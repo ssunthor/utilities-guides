@@ -1,7 +1,7 @@
 # Application Management Utility (AMU) - Design Document
 
-**Version:** 0.1
-**Date:** 2026-05-18
+**Version:** 0.2.0
+**Date:** 2026-05-19
 **Author:** Martin Kecka & Gemini AI
 **Category:** (U) Utility / Administrative
 **Acronym:** AMU
@@ -20,33 +20,64 @@ AMU serves as the primary data aggregator for the Sera Admin Module (SAM) UI reg
 
 ## 2. Core Architectural Principles 🏗️
 
-1. **Logical Abstraction:** AMU does not care about pods, nodes, or physical hardware. It cares about Application IDs, versions, user feedback tickets, and logical dependencies (e.g., "Cash Application Assistant depends on the SNOW Connector").
-2. **Standardized Ecosystem Contracts:** AMU enforces ecosystem compliance. To be managed by AMU, an application must implement a standardized set of gRPC endpoints (`/info`, `/health`, `/feedback`).
-3. **Database-Backed Registry:** AMU uses its own PostgreSQL database to maintain the global registry of applications, tracking their metadata and the state of their feedback tickets.
-4. **Shared File-System Access:** For MVP log inspection and documentation aggregation, AMU relies on direct read access to standardized shared volumes (e.g., `/ai/assets/logs/` and `/ai/assets/docs/`).
+1. **Logical Abstraction:** AMU does not care about pods, nodes, or physical hardware. It cares about Application IDs, versions, user feedback tickets, and logical dependencies.
+2. **Standardized Ecosystem Contracts:** AMU enforces ecosystem compliance. To be managed by AMU, an application must implement a standardized set of gRPC endpoints via the `sera_standard.proto`.
+3. **Network Boundary Mapping:** AMU classifies application dependencies into four distinct architectural boundaries: `LOCAL` (same host), `AI_FACTORY` (internal cluster), `CORPORATE` (internal network), and `EXTERNAL` (SaaS/Internet).
+4. **Database-Backed Registry:** AMU uses its own PostgreSQL database to maintain the global registry of applications and state logic, decoupled into robust Reader/Writer I/O patterns.
+5. **Shared File-System Access:** For MVP log inspection and documentation aggregation, AMU relies on direct read access to standardized shared volumes (e.g., `/ai/assets/logs/` and `/ai/assets/docs/`).
 
 ---
 
-## 3. The "SERA Standard" Application Contract 🤝
+## 3. Developer Guide: How to Register a New App 🛠️
 
-For an application to be successfully registered and managed by AMU, it must implement a standardized gRPC interface. This allows AMU to query any app generically without needing custom, app-specific logic.
+For AMU to successfully track, monitor, and route tickets for your application, it must comply with the ecosystem standards.
 
-### 3.1. Standardized Endpoints
-Every compliant microservice must expose the following gRPC methods:
+### 3.1. Implement the SERA Standard Protobuf
+Your application's gRPC server MUST expose the `SeraAppService` defined in `/ai/assets/protos/sera_standard/sera_standard.proto`. 
 
-* **`GetAppInfo()`**: Returns static metadata about the application.
-  * **Payload:** Version, Acronym, Category, Description, and a list of downstream **Logical Dependencies** (e.g., `["psql", "redis", "snow_connector", "vllm-gemma4-31b"]`).
-* **`GetDeepHealth()`**: Returns the *logical* health of the application.
-  * **Payload:** A matrix evaluating the application's ability to reach its declared dependencies (e.g., "PostgreSQL Connection: OK", "SNOW Connector: FAILED").
-* **`GetFeedback() / SubmitFeedback()`**: Exposes the application's internal user feedback loops to the central AMU broker.
+You are required to implement the following RPC methods:
+* **`GetAppInfo()`**: Returns static metadata (Acronym, Name, Category, Version) and a flat list of downstream dependencies.
+* **`GetDeepHealth()`**: Evaluates the app's ability to reach its dependencies (e.g., Databases, APIs). The AMU heuristic engine parses the `connection_metadata` (like `host` or `instance_url`) to map the dependency into the correct network boundary (`LOCAL`, `AI_FACTORY`, `CORPORATE`, `EXTERNAL`).
+* **`GetChangelog()`**: Returns raw YAML from your `docs/CHANGELOG.yaml`.
+* **`GetDocs()`**: Returns raw Markdown from your design documentation.
+* **`GetFeedback()`**: (If applicable) Exposes UI feedback loops.
 
 ### 3.2. Minimum Verification Rules
-When a new application is registered with AMU (e.g., via CLI `amu-cli register --app cap`), AMU will perform a basic validation check before adding it to the database:
+When a new application is registered with AMU, AMU will perform a strict validation check before adding it to the database:
 1. **Metadata Existence:** Verifies the presence of a properly formatted `settings.yaml` with a `module_info` block.
 2. **Documentation Structure:** Verifies the existence of a `docs/` folder, a `CHANGELOG.yaml`, and a main design document.
 3. **API Compliance:** Attempts to ping the application's `/info` and `/health` endpoints to ensure the gRPC contract is respected.
 
 *(Note: Verification rules will evolve and become stricter as the ecosystem matures.)*
+
+### 3.3. Ensure Proper Configuration
+AMU relies on your `settings.yaml` to extract the port if you are using path-based registration. Ensure your config has either:
+`grpc_server: { port: 50xxx }` OR `api: { port: 78xxx }`.
+
+### 3.4. Register via the CLI
+Use the AMU CLI to onboard the application. You can do this by exact endpoint, by directory path, or via an automated port sweep.
+
+[bash]
+# Option A: Register by explicit Endpoint
+python3 application_management_utility.py registry register --endpoint "localhost:50091"
+
+# Option B: Register by Directory Path
+python3 application_management_utility.py registry register --path /ai/snow_connector
+
+# Option C: Auto-Discover (Sweeps standard port ranges)
+python3 application_management_utility.py registry register --auto
+[/bash]
+
+### 3.5. Verify Your Registration
+Once registered, verify that AMU successfully parsed your app and mapped its dependencies correctly:
+
+[bash]
+# Check the registry
+python3 application_management_utility.py registry list
+
+# Verify the network boundary mappings
+python3 application_management_utility.py registry deps
+[/bash]
 
 ---
 
@@ -54,15 +85,14 @@ When a new application is registered with AMU (e.g., via CLI `amu-cli register -
 
 ### 4.1. Application Registry & Dependency DAG
 AMU maintains the global list of active microservices in PostgreSQL. 
-* Because microservices share resources (like the ServiceNow connector), AMU uses the data from `GetAppInfo()` to build a **Directed Acyclic Graph (DAG)** of dependencies. 
-* This allows the SAM UI to render accurate dependency maps and trace logical cascading failures (e.g., if the SNOW Connector dies, AMU knows exactly which frontend applications are affected).
+* It uses the data from `GetDeepHealth()` to build a **Directed Acyclic Graph (DAG)** of dependencies, dynamically classifying them into environment targets (`dev`, `prod`) and network zones.
+* This allows the SAM UI to render accurate dependency maps and trace logical cascading failures.
 
-### 4.2. Centralized Feedback Broker
+### 4.2. Centralized Feedback Broker (SNC Connector)
 AMU acts as the middleman between user-facing applications (like Cash Application Assistant) and IT Service Management (ServiceNow).
-1. AMU continuously polls (or receives pushed) feedback from registered apps via the `/feedback` gRPC contract.
+1. AMU aggregates feedback from registered apps.
 2. AMU normalizes this feedback and stores it in its PostgreSQL database.
-3. AMU routes actionable feedback through the `snow_connector` to generate official INC/RITM tickets.
-4. AMU tracks the ticket state and serves the unified "Feedback Inbox" directly to the SAM UI for administrators.
+3. AMU utilizes the **SNCConnector** (`core/connectors/snc_connector.py`) to fire direct gRPC payloads to the ServiceNow Connector, generating official Incidents or Service Requests dynamically.
 
 ### 4.3. Log Inspection Engine
 AMU provides administrators with a direct view into application logs without requiring `kubectl` access.
@@ -70,35 +100,15 @@ AMU provides administrators with a direct view into application logs without req
 * **Future State:** AMU will transition to querying a centralized logging database (VictoriaLogs) using `trace_id` for distributed log correlation.
 
 ### 4.4. Documentation Aggregator
-AMU replaces localized script-based documentation fetchers. It scans the registered applications, parses their `docs/` directories, and serves aggregated Markdown and Changelog JSON payloads directly to the SAM WebUI.
+AMU replaces localized script-based documentation fetchers. It proxy-calls the `GetChangelog` and `GetDocs` endpoints of registered apps, parses the raw strings into structured JSON payloads, and serves them directly to the SAM WebUI.
 
 ---
 
-## 5. High-Level Database Schema (PostgreSQL) 🗄️
+## 5. Roadmap & Future Enhancements 🚀
 
-AMU will utilize a structured relational database to maintain ecosystem state.
-
-* **`applications` table:**
-  * `id` (PK)
-  * `acronym` (Unique, e.g., 'CAA', 'HMU')
-  * `name`, `version`, `category`, `description`
-  * `grpc_endpoint` (How AMU contacts it)
-  * `registered_at`, `last_verified_at`
-* **`app_dependencies` table (The DAG):**
-  * `parent_app_id` (FK)
-  * `child_dependency_name` (e.g., 'snow_connector')
-* **`feedback_tickets` table:**
-  * `id` (PK)
-  * `app_id` (FK - Where the feedback originated)
-  * `user_id`, `timestamp`
-  * `raw_content`, `ai_analysis_summary`
-  * `snow_ticket_number` (Nullable, injected once synced with ServiceNow)
-  * `status` (New, In Progress, Resolved)
-
----
-
-## 6. Roadmap & Future Enhancements 🚀
-
-* **Gateway Integration:** In future iterations of the Sera AI Gateway architecture, AMU will act as the control plane. AMU will possess the ability to dynamically "deploy" or "deregister" applications in the Gateway's proxy configuration, moving away from hardcoded `config.py` files.
+* **Gateway Integration:** In future iterations of the Sera AI Gateway architecture, AMU will act as the control plane to dynamically "deploy" or "deregister" applications in the Gateway's proxy configuration.
+* **Standardization & Compliance Matrix:** Build an automated scoring system within the dashboard that grades registered applications on ecosystem compliance (e.g., verifying `CHANGELOG.yaml`, `docs/`, `system_services`, and LLM configs are properly populated).
+* **Remote Action Execution:** Expand the `sera_standard.proto` to allow AMU to trigger lifecycle events on remote microservices (e.g., `RESTART_SERVICES`, `REBUILD_UI`). *Note: While currently this would target `systemctl` or `npm`, the abstraction ensures seamless transition when services migrate to Kubernetes/GitLab orchestration in the future.*
 * **VictoriaLogs Integration:** Transition the Log Inspection Engine from parsing flat files in `/ai/assets/logs/` to querying VictoriaLogs via PromQL/MetricsQL.
 * **Automated Changelog Blasts:** Allow AMU to automatically parse new `CHANGELOG.yaml` entries upon application registration and broadcast release notes to users via email or UI notifications.
+* **Deep Feedback Analytics:** Pass raw user feedback strings through local LLMs to automatically categorize issues as "Bugs" vs "Feature Requests" before handing them off to the SNC Connector.
