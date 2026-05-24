@@ -205,3 +205,10 @@ Auditing the external VMs to ensure physical traffic routing aligns with the int
 HMU will explicitly define and aggregate the core metrics required to chart business-level AI SLAs:
 * **Time-To-First-Token (TTFT):** The most critical metric for perceived LLM performance.
 * **Cache Hit Ratios:** Tracking prefix/KV cache hit rates over time to validate the computational efficiency of prompt caching.
+
+### 3.5. Separation of Observability and Provisioning
+To maintain clear boundaries in the microservice mesh, HMU will act as the single pane of glass for all **Read-Only Telemetry & Auditing**, while a new Identity Manager Utility (IMU) will handle stateful resource provisioning (DB creation, Keycloak clients, Vault secrets).
+* **Current Execution:** Redis and Valkey global cache auditing logic has been centralized into HMU (`valkey-cluster`, `valkey-inspect`, `redis-inspect`).
+* **Future Roadmap:** 
+  * **PostgreSQL:** Extract all read-only DB monitoring (e.g., `db-activity`, `db-status`, `db-cluster`) from legacy scripts and into HMU to monitor the global Patroni deployments and local utility databases.
+  * **Vector Databases:** Implement global inspection/auditing for both local Chroma DBs and production Qdrant clusters directly within HMU.
