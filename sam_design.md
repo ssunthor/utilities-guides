@@ -4,6 +4,7 @@
 **Date:** 2026-05-23
 **Author:** Martin Kecka & Gemini AI
 **Category:** (U) Utility / Administrative
+**Acronym:** SAM
 
 ## 1. Introduction & Purpose
 

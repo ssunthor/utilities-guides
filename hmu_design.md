@@ -1,7 +1,8 @@
-# Health Monitoring Utility (HMU) - Design & Setup Document
+# Health Monitoring Utility (HMU) - Design Document
 
-**Version:** 0.2
+**Version:** 0.2.0
 **Date:** 2026-05-09
+**Author:** Martin Kecka & Gemini AI
 **Category:** (U) Utility / Administrative
 **Acronym:** HMU
 
