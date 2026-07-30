@@ -1,7 +1,7 @@
 # Sera Admin Module (SAM) - Design Document
 
-**Version:** 0.3.1
-**Date:** 2026-05-23
+**Version:** 0.4.9
+**Date:** 2026-07-08
 **Author:** Martin Kecka & Gemini AI
 **Category:** (U) Utility / Administrative
 **Acronym:** SAM
@@ -10,33 +10,26 @@
 
 The **Sera Admin Module (SAM)** is the centralized, modular platform for monitoring, debugging, managing, and operating the entire SERA AI ecosystem.
 
-The primary goal of SAM is to replace all disparate administrative tools (e.g., `history_lookup.py`, `systemd` log checks, direct file edits) with a single, unified, and secure interface. It provides a "single pane of glass" for developers, operators, and administrators to observe system health, debug user interactions, inspect data, and manage platform configurations.
+The primary goal of SAM is to replace all disparate administrative tools with a single, unified, and secure interface. It provides a "single pane of glass" for developers, operators, and administrators to observe system health, debug user interactions, inspect data, and manage platform configurations.
 
 This document outlines the "Sera Admin Suite" architecture, which consists of:
 
-1.  **The `SAM` (Sera Admin Module) Project:** This is the central user-facing project (e.g., `/ai/sera_admin_module/`) that follows the standard SERA Module Blueprint. It contains three key components:
+1.  **The `SAM` (Sera Admin Module) Project:** This is the central user-facing project (e.g., `/ai/sera_admin_module/`) that follows the standard SERA Module Blueprint. It contains:
     * **`SAM-WebUI` (React):** The graphical frontend for administrators.
-    * **`SAM-Backend` (Aggregator):** The "Backend for Frontend" (BFF) that serves the `SAM-WebUI`.
-    * **`SAM-CLI` (Python):** The command-line interface for developers and "power users".
+    * **`SAM-Backend` (Aggregator):** The "Backend for Frontend" (BFF) that serves the `SAM-WebUI` and caches telemetry.
 
-2.  **"Addon" Utility Modules:** A collection of *separate, independent, headless* gRPC utility modules (`AMU`, `HMU`, `DIU`, `HIU`, `CU`, `MTU`) that provide the actual backend functionality.
+2.  **"Addon" Utility Modules:** A collection of *separate, independent, headless* gRPC utility modules (`AMU`, `HMU`, `OMU`, `DIU`, `HIU`, `CU`, `MTU`) that provide the actual backend functionality.
 
 ## 2. Core Architectural Principles
 
 SAS is built on a "headless backend" and "aggregator" microservice model.
 
-1.  **Central "Admin" Module:** `SAM` is the single project that provides the user-facing interfaces (`SAM-WebUI` and `SAM-CLI`) and the UI's backend.
-
-2.  **Specialized "Utility" Modules:** All "addon" utilities (`AMU`, `HMU`, `DIU`, `HIU`, `CU`, `MTU`) are independent, headless gRPC services, each with a single responsibility. They follow the standard [SERA Module Blueprint](https://gitlab.gt-t.net/ai/sera/guides/-/blob/master/tool_guides/module_blueprint.md).
-
-3.  **Aggregator Pattern:** The `SAM-Backend` (part of the `SAM` module) is the *only* thing the `SAM-WebUI` (React) talks to. This `SAM-Backend` acts as an *aggregator*, fanning out gRPC requests to all other specialized utility modules (`DIU`, `HIU`, etc.) and collecting the results. This simplifies the frontend, centralizes UI-facing logic, and reduces client-side complexity.
-
-4.  **CLI Bypasses Aggregator:** The `SAM-CLI` is a "power tool" and does *not* talk to the `SAM-Backend`. It bypasses the aggregator and makes gRPC calls *directly* to the specialized utility modules (`AMU`, `HMU`, `DIU`, `HIU`, `CU`, `MTU`). This is more robust for scripting and debugging, as it has fewer dependencies.
-
+1.  **Central "Admin" Module:** `SAM` is the single project that provides the user-facing interfaces and the UI's backend.
+2.  **Specialized "Utility" Modules:** All "addon" utilities (`AMU`, `HMU`, `OMU`, `DIU`, `HIU`, `CU`, `MTU`) are independent, headless gRPC services, each with a single responsibility. They follow the standard SERA Module Blueprint.
+3.  **Aggregator Pattern:** The `SAM-Backend` (FastAPI) is the *only* thing the `SAM-WebUI` (React) talks to. This `SAM-Backend` acts as an *aggregator*, fanning out gRPC requests to all other specialized utility modules (`AMU`, `HMU`, `OMU`, `DIU`) and collecting the results. This simplifies the frontend, centralizes UI-facing logic, and reduces client-side complexity.
+4.  **Redis Caching Layer:** To prevent overwhelming downstream services, `SAM-Backend` utilizes a local Redis instance (DB 8) to cache topology, inventory, and health check payloads, serving them instantly to the frontend.
 5.  **Observability via `trace_id`:** The entire ecosystem will be built around a **Distributed Tracing** model. Every user request generates a `trace_id` which is propagated through all gRPC calls. This allows SAM to provide a complete, end-to-end log of a single user turn.
-
 6.  **Centralized Logging (Loki):** All modules will stop logging to local files (`/ai/assets/logs/`). They will be re-configured to stream logs to a central **Loki** instance, making them queryable by `trace_id`.
-
 7.  **Configuration: Decentralized Files, Centralized Management:**
     * **Source of Truth:** Each module's local `config/settings.yaml` file is the *absolute source of truth* for that module's configuration.
     * **No Startup Dependency:** Modules start on their own by reading their local file. They have **zero** startup dependency on the `CU`.
@@ -44,81 +37,76 @@ SAS is built on a "headless backend" and "aggregator" microservice model.
 
 ## 3. System Components
 
-### 3.1. `sera_admin_module` (SAM) - \[NEW MODULE\]
+### 3.1. `sera_admin_module` (SAM) - [IMPLEMENTED]
 
 This is the main project, following the module blueprint structure (e.g., `/ai/sera_admin_module/`).
 
-* `/ui/`: Contains the **`SAM-WebUI`** (React) code.
+* `/ui/`: Contains the **`SAM-WebUI`** (React/Vite) code.
 * `/cli/`: Contains the **`SAM-CLI`** (Python/Click) code.
 * `/rest_api/` and `/grpc_api/`: Contains the **`SAM-Backend`** (FastAPI/gRPC) aggregator service.
-* `/core/connectors/`: Contains the `SAM-Backend`'s gRPC clients for talking to `AMU`, `HMU`, and planned modules (`DIU`, `HIU`, `CU`, `MTU`).
-* `config/settings.yaml`: Contains the gRPC endpoints for all the utility modules that the `SAM-Backend` and `SAM-CLI` need to call.
+* `/core/connectors/`: Contains the `SAM-Backend`'s gRPC clients for talking to `AMU`, `HMU`, `OMU`, `DIU`, and planned modules.
+* `/core/services/`: Contains the Autonomous SRE Reasoning Engine (`diagnostic_service.py`) and GitOps orchestration tools.
+* `/static/`: Contains static assets like `pricing.json` for ecosystem cost calculations.
+* `config/settings.yaml`: Contains the gRPC endpoints for all the utility modules that the `SAM-Backend` needs to call.
 
 ---
 #### 3.1.1. `SAM-WebUI` (React Frontend)
 
-* **Technology:** React (Vite, shadcn/ui), lives in `sera_admin_module/ui/`.
+* **Technology:** React (Vite, MUI), Recharts, Tanstack Query, lives in `sera_admin_module/ui/`.
 * **Authentication:** Relies on HTTP headers (`X-Forwarded-User`, `X-Forwarded-Groups`) injected by the Sera AI Gateway.
-* **Backend:** Communicates *exclusively* with the `SAM-Backend` (FastAPI/gRPC-Web) living in the same project.
+* **Backend:** Communicates *exclusively* with the `SAM-Backend` (FastAPI) living in the same project.
 
 **Key UI Pages (Divided by Module):**
 
 #### Powered by HMU (Health Monitor Utility)
-1.  **🧠 AI Engines:** Displays real-time operational status of vLLM instances, NVIDIA Triton Inference Servers, and Morpheus pipelines. Includes the Model Config Dialog and Test Model features.
+1.  **🧠 AI Engines:** Displays real-time operational status of vLLM instances and NVIDIA Triton Inference Servers. Includes the Model Config Dialog and Feature Testing features.
 2.  **🖥️ Physical Topology:** A grid view of physical nodes, detailing OS metrics (CPU, RAM, NVMe) and granular GPU utilization across the AI factory.
 3.  **🚦 Ingress Traffic:** A Model-Centric Layered Controller view correlating routing health across F5, VM HAProxy, and Kubernetes HAProxy layers.
 4.  **📅 Events & Rules:** Features a searchable Event Timeline and a read-only view of System Rules, including SRE diagnostics generated autonomously by the Gemma-4-31B reasoning model.
+5.  **🚀 Benchmarks:** Combinatorial load testing suite streaming live execution matrices for endpoint stress testing.
+6.  **💰 Cost & Usage:** Financial aggregation tracking daily and monthly token footprints against a 6-tier flagship pricing matrix.
 
 #### Powered by AMU (Application Management Utility)
-5.  **🌐 Ecosystem Topology:** A centralized view for Application Portfolio Management (APM). Maps dependencies, network boundaries (LOCAL, AI_FACTORY, CORPORATE, EXTERNAL), and tracks multi-service arrays across the ecosystem.
-6.  **📦 Ecosystem Releases:** A unified tracker for all microservice version updates. Aggregates changelogs dynamically and provides a GitOps Orchestration toggle for autonomous deployments.
+7.  **🌐 Ecosystem Topology:** A centralized view for Application Portfolio Management (APM). Maps dependencies, network boundaries, and tracks multi-service arrays across the ecosystem.
+8.  **📦 Ecosystem Releases:** A unified tracker for all microservice version updates. Aggregates changelogs dynamically and provides a GitOps Orchestration toggle for autonomous deployments.
+9.  **🤖 AI Agent Inventory:** Tracks internal microservices and External/Unmanaged Agents, enforcing UI capabilities for AI Act compliance metadata mapping.
 
-#### Planned Integrations (DIU, HIU, CU, MTU)
-7.  **🔍 Centralized Log Viewer:** (Planned) An embedded **Grafana** dashboard configured to query the **Loki** database.
-8.  **💬 Conversation History Inspector:** (Planned - HIU) A UI that lists all user sessions and turns, allowing trace-based debugging.
-9.  **📚 Knowledge Base Inspector:** (Planned - DIU) Allows browsing Confluence spaces, pages, and chunks.
-10. **📥 Centralized Feedback Inbox:** (Planned) A single inbox that aggregates feedback from ecosystem apps.
-11. **🛠️ Configuration Manager:** (Planned - CU) A "self-service" UI to view and edit `settings.yaml` files globally.
-12. **🚀 Module Template Builder:** (Planned - MTU) A wizard-style UI to generate skeleton code for new SERA modules.
+#### Powered by OMU (Operation Management Utility)
+10. **⚙️ Operations Dashboard:** Fleet-wide introspection for stateful core infrastructure. Monitors Patroni (PSQL), Qdrant, HAProxy, DCS (Consul/Etcd), Valkey, Kafka, and Vault clusters.
+
+#### Powered by DIU (Data Inspector Utility)
+11. **🔍 Knowledge Tree Browser:** Browse Confluence spaces via a hierarchical sidebar mapped directly to the vector database.
+12. **🔬 Investigation View:** Inspect raw document chunks, semantic routing logic, HyDE questions, synthesized Q&A, and structured tables.
+
+#### Planned Integrations (HIU, CU, MTU)
+13. **🔍 Centralized Log Viewer:** (Planned) An embedded **Grafana** dashboard configured to query the **Loki** database.
+14. **💬 Conversation History Inspector:** (Planned - HIU) A UI that lists all user sessions and turns, allowing trace-based debugging.
+15. **📥 Centralized Feedback Inbox:** (Planned) A single inbox that aggregates feedback from ecosystem apps.
+16. **🛠️ Configuration Manager:** (Planned - CU) A "self-service" UI to view and edit `settings.yaml` files globally.
+17. **🚀 Module Template Builder:** (Planned - MTU) A wizard-style UI to generate skeleton code for new SERA modules.
 
 ---
 #### 3.1.2. `SAM-CLI` (Command-Line Client)
 
 * **Technology:** Python (`click`), lives in `sera_admin_module/cli/`.
-* **Architecture:** A "power tool" client acting as a unified entry point. It bypasses the aggregator and communicates *directly* with the specialized utility modules (`AMU`, `HMU`, etc.).
-* **Design Note (CLI Integration Strategy):** Since individual modules like AMU and HMU ship with their own local CLIs, `SAM-CLI` is designed to run in a shared Python development environment (e.g., Kubernetes dev pods or local environments) where it can dynamically import their respective `click` command groups. This strictly prevents duplicate CLI rendering logic while still offering a unified entry point.
-* **Usage:**
+* **Architecture:** Scoped strictly to managing the SAM application lifecycle and executing local utility scripts. It does not aggregate commands from downstream utility modules.
+* **Commands:**
     ```bash
-    # It will consume the utility services directly (Implemented)
-    sam-cli amu info deployments                 # Calls AMU for physical paths and service statuses
-    sam-cli amu registry deps                    # Calls AMU for dependency topology mappings
-    sam-cli amu git status                       # Calls AMU GitOps Orchestration engine
-    sam-cli hmu halo-status                      # Calls HMU for Triton Server telemetry
-    sam-cli hmu benchmark-model                  # Calls HMU for automated load testing
-    
-    # Planned Commands
-    sam-cli history list-sessions                # Calls HIU.ListSessions
-    sam-cli history get-turn <turn_id> --logs    # Calls HIU.GetTurnDetails, gets trace_id, then queries Grafana/Loki
-    sam-cli kb find-page "Netbox"                # Calls DIU.FindPageByTitle
-    sam-cli feedback list --source cap           # Calls CAP.GetFeedback
-    
-    # New Config Commands (Planned)
-    sam-cli config list                          # Calls CU.ListRegisteredModules
-    sam-cli config get cap                       # Calls CU.GetModuleConfig("cap")
-    sam-cli config set cap llm_interface.model "gemma4:latest" # Calls CU.UpdateModuleConfig(...)
-    sam-cli config reload cap                    # Calls CU.ReloadModuleConfig("cap")
-
-    sam-cli module new <module-name>             # Calls MTU.GenerateModule
+    sam-cli start-api-server --port <port>   # Bootstraps the FastAPI REST backend
+    sam-cli start-grpc-server                # Bootstraps the SERA standard gRPC service
+    sam-cli cache clear                      # Flushes the SAM Redis cache (DB 8) and cooldown locks
+    sam-cli module info                      # Retrieves local app info via the SERA Standard gRPC
+    sam-cli module check-health              # Retrieves local deep health via the SERA Standard gRPC
+    sam-cli benchmarks run-automated         # Executes the combinatorial load testing suite against HMU
     ```
 
 ---
 
-### 3.2. "Addon" Utility Modules (All \[NEW MODULES\])
+### 3.2. "Addon" Utility Modules
 
 These are all *separate, independent projects* that follow the SERA Module Blueprint (headless, no UI).
 
-### 3.2.1. `AMU (Application Management Utility)` - [IMPLEMENTED]
-
+#### 3.2.1. `AMU (Application Management Utility)` - [IMPLEMENTED]
 * **Category:** (U) Utility
 * **Purpose:** Headless gRPC backend for Application Portfolio Management (APM) and Ecosystem Topology.
 * **Responsibilities:**
@@ -126,19 +114,32 @@ These are all *separate, independent projects* that follow the SERA Module Bluep
     * **Dependency Mapping:** Evaluates network boundaries (LOCAL, AI_FACTORY, CORPORATE, EXTERNAL) and maps dependencies across microservices.
     * **Changelog Aggregation:** Dynamically retrieves, parses, and unifies module documentation and YAML changelogs.
     * **GitOps Orchestration:** Orchestrates automated deployments by comparing local Git states and generating LLM-summarized commits.
+    * **Agent Inventory:** Tracks external agents and manages compliance data bridging.
 
-### 3.2.2. `HMU (Health Monitor Utility)` - [IMPLEMENTED]
-
+#### 3.2.2. `HMU (Health Monitor Utility)` - [IMPLEMENTED]
 * **Category:** (U) Utility
-* **Purpose:** Provides real-time, centralized health status, hardware telemetry, and AI-driven diagnostics for the entire ecosystem.
+* **Purpose:** Provides real-time, centralized health status, hardware telemetry, and load-testing pipelines.
 * **Responsibilities:**
     * **Infrastructure Monitoring:** Integrates with Rancher Kubernetes API and Prometheus TSDB to track physical nodes, GPU utilization, and OS metrics.
-    * **AI Engine Tracking:** Discovers and monitors vLLM instances, NVIDIA Triton Inference Servers, and Morpheus pipelines.
-    * **SRE Diagnostics:** Utilizes Gemma-4-31B reasoning model to autonomously diagnose hardware faults, traffic saturation, and configuration drift (e.g., `ZOMBIE_MODEL`).
+    * **AI Engine Tracking:** Discovers and monitors vLLM instances and NVIDIA Triton Inference Servers.
     * **Feature Testing:** Provides programmatic model inspection, load testing (`RunBenchmark`), and token distribution payload analytics.
 
-### 3.2.3. `HIU (History Inspector Utility)` - [PLANNED]
+#### 3.2.3. `OMU (Operation Management Utility)` - [IMPLEMENTED]
+* **Category:** (U) Utility
+* **Purpose:** Core infrastructure introspection and host patching management.
+* **Responsibilities:**
+    * **Stateful Introspection:** Health checks Patroni (Postgres), Qdrant, HAProxy, Consul/Etcd, Valkey, Kafka, and Vault.
+    * **OS Inventory & Auditing:** Exposes active Linux kernels, pending APT updates, and historical OS patching logs across physical and virtual clusters.
 
+#### 3.2.4. `DIU (Data Inspector Utility)` - [IMPLEMENTED]
+* **Category:** (U) Utility
+* **Purpose:** Headless gRPC backend for Knowledge Base mapping.
+* **Responsibilities:**
+    * Queries the SERA semantic database to retrieve recursive category trees.
+    * Maps document chunks to original Confluence IDs and vectors.
+    * Exposes LLM-derived metadata (HyDE questions, summaries, entities, and structured tables).
+
+#### 3.2.5. `HIU (History Inspector Utility)` - [PLANNED]
 * **Category:** (U) Utility
 * **Purpose:** A robust gRPC service refactor of the `history_lookup.py` script.
 * **Responsibilities:**
@@ -146,8 +147,7 @@ These are all *separate, independent projects* that follow the SERA Module Bluep
     * Exposes endpoints like `ListSessions()`, `GetSessionDetails(session_id)`.
     * **CRITICAL API Feature:** The `GetTurnDetails(turn_id)` method **must** return the `trace_id` associated with that turn.
 
-### 3.2.4. `CU (Configuration Utility)` - [PLANNED]
-
+#### 3.2.6. `CU (Configuration Utility)` - [PLANNED]
 * **Category:** (U) Utility
 * **Purpose:** The secure backend for *all* ecosystem configuration management.
 * **Responsibilities:**
@@ -160,8 +160,7 @@ These are all *separate, independent projects* that follow the SERA Module Bluep
         4.  Calls the `ReloadConfig()` gRPC endpoint on the target module (e.g., `CAP.ReloadConfig()`).
     * **Config Reloader:** Exposes `ReloadModuleConfig(module_name)` to just trigger the reload call.
 
-### 3.2.5. `MTU (Module Template Utility)` - [PLANNED]
-
+#### 3.2.7. `MTU (Module Template Utility)` - [PLANNED]
 * **Category:** (U) Utility
 * **Purpose:** The secure backend for the "Module Template Builder."
 * **Responsibilities:**
@@ -170,11 +169,24 @@ These are all *separate, independent projects* that follow the SERA Module Bluep
     * The request will include parameters like `module_name` ("MyNewTool"), `category` ("Connector"), and `acronym` ("MNT").
     * Returns a base64-encoded `.zip` file with the complete module template.
 
-## 4. Core Infrastructure & Module Requirements
+---
+
+## 4. Autonomous SRE Reasoning Engine
+
+Built into the `SAM-Backend` (`core/services/diagnostic_service.py`), SAM actively utilizes an LLM to evaluate complex system failures.
+
+1.  **Rule Evaluation:** The `automated_diagnostics_daemon` continually evaluates incoming telemetry from HMU and OMU against definitions in the `event_rules` table.
+2.  **Context Snapshotting:** When a threshold rule triggers, SAM compiles a targeted JSON snapshot (e.g., fetching Triton pod logs, specific GPU temperatures, HAProxy queues).
+3.  **LLM Inference:** The snapshot is injected into a specific SRE prompt (`GPU_DIAGNOSTIC_PROMPT`, `TRAFFIC_DIAGNOSTIC_PROMPT`, `TRITON_DIAGNOSTIC_PROMPT`, `CONFIG_DRIFT_DIAGNOSTIC_PROMPT`) and sent to the primary reasoning model (Gemma-4-31B at Temperature 0.0).
+4.  **Resolution:** The LLM deterministically extracts a severity level (`CRITICAL`, `WARNING`, `INFO`, `FALSE_POSITIVE`), deduces the root cause, and prescribes actionable remediation steps which are recorded into the database and shown on the UI Event Timeline.
+
+---
+
+## 5. Core Infrastructure & Module Requirements
 
 To make SAM functional, the following changes **must** be implemented across the entire ecosystem.
 
-### 4.1. Distributed Tracing (`trace_id`)
+### 5.1. Distributed Tracing (`trace_id`)
 
 * **Priority:** **CRITICAL**
 * **Requirement:** A unique `trace_id` must be generated for every user interaction and propagated to all downstream services for end-to-end logging.
@@ -185,7 +197,7 @@ To make SAM functional, the following changes **must** be implemented across the
         2.  Include this `trace_id` in *every single log message* they generate.
         3.  Pass this `trace_id` along in any *outgoing* gRPC calls they make.
 
-### 4.2. Centralized Logging (Loki Stack)
+### 5.2. Centralized Logging (Loki Stack)
 
 * **Priority:** **HIGH**
 * **Requirement:** All logs must be streamed to a central, queryable database instead of being written to local files.
@@ -194,14 +206,14 @@ To make SAM functional, the following changes **must** be implemented across the
 * **New Infrastructure:**
     * **Loki, Promtail, Grafana:** This stack must be deployed to act as the central log database and viewer.
 
-### 4.3. Standardized Health Checks
+### 5.3. Standardized Health Checks
 
 * **Priority:** **HIGH**
 * **Requirement:** The `HMU` needs a reliable, standard way to ping every service.
 * **Module Changes:**
     * **All gRPC Modules:** Must implement the standard [gRPC Health Checking Protocol](httpss://github.com/grpc/grpc/blob/master/doc/health-checking.md).
 
-### 4.4. Module-Level Feedback Endpoints
+### 5.4. Module-Level Feedback Endpoints
 
 * **Priority:** **MEDIUM**
 * **Requirement:** The `SAM-Backend` needs a standard way to aggregate feedback.
@@ -210,14 +222,16 @@ To make SAM functional, the following changes **must** be implemented across the
         * `rpc GetFeedback(GetFeedbackRequest) returns (FeedbackListResponse);`
         * `rpc UpdateFeedback(UpdateFeedbackRequest) returns (FeedbackResponse);`
 
-### 4.5. Standardized Config Reload Endpoint
+### 5.5. Standardized Config Reload Endpoint
 
 * **Priority:** **MEDIUM**
 * **Requirement:** The `CU` needs a way to notify modules that their `settings.yaml` file has changed.
 * **Module Changes:**
     * **All Modules:** Must expose a new, standard gRPC endpoint (e.g., `rpc ReloadConfig(ReloadConfigRequest) returns (ReloadConfigResponse);`). When called, this triggers the module to re-load its `settings.yaml` file from disk into its running config object (without a full restart).
 
-## 5. Phased Implementation Plan
+---
+
+## 6. Phased Implementation Plan
 
 ### Phase 1: Foundation & Observability (Implemented)
 
@@ -228,16 +242,16 @@ To make SAM functional, the following changes **must** be implemented across the
     3.  Build the `SAM` module project, including:
         * `SAM-Backend` (gRPC service) acting as an aggregator for `AMU` and `HMU`.
         * `SAM-WebUI` (React) with integrated pages: **Ecosystem Health** (HMU), **Ecosystem Topology** (AMU), and **Ecosystem Releases** (AMU).
-        * `SAM-CLI` (Python) with commands to interface directly with `AMU` and `HMU` capabilities.
 * **Value:** Provides a "single pane of glass" for ecosystem observability and automated deployment management.
 
-### Phase 1.5: History & Knowledge (Planned)
+### Phase 1.5: History & Knowledge (Partially Implemented)
 
 * **Goal:** Expand developer tools into conversation history and knowledge base inspection.
 * **Tasks:**
     1.  Build `HIU` (gRPC service) by refactoring `history_lookup.py`.
-    2.  Build `DIU` (gRPC service) to browse Confluence knowledge base data.
-    3.  Add **KB Inspector** and **History Inspector** pages to SAM.
+    2.  Build `DIU` (gRPC service) to browse Confluence knowledge base data. *(COMPLETED)*
+    3.  Add **KB Inspector** and **History Inspector** pages to SAM. *(KB Inspector COMPLETED via DIU integration)*
+    4.  Build `OMU` (gRPC service) for stateful component and OS tracking. *(COMPLETED)*
 
 ### Phase 2: End-to-End Observability (Operator Value)
 
@@ -260,5 +274,4 @@ To make SAM functional, the following changes **must** be implemented across the
     4.  Build the `MTU` (gRPC service) for generating new module templates.
     5.  Enhance `SAM-Backend` to call the new `CU`, `MTU`, and feedback endpoints.
     6.  Add the **Feedback Inbox**, **Configuration Manager**, and **Module Builder** pages to `SAM-WebUI`.
-    7.  Expand `SAM-CLI` to cover all new management functions.
 * **Value:** Fulfills the "self-service" goal, centralizes all administrative tasks, and accelerates new module development.
