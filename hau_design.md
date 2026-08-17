@@ -1,12 +1,13 @@
-# HALO Admin Utility (HAU) - Design Document
+# HALO Admin Utility (HAU) - Architecture & Design Document
 
-**Version:** 0.1.1
-**Date:** 2026-07-30
-**Author:** Martin Kecka & Gemini AI
-**Category:** (U) Utility / Administration & Operations Portal
+**Doc_Type:** Architecture
+**Category:** (U) Utility
+**Name:** HALO Admin Utility
 **Acronym:** HAU
-
----
+**Version:** 0.1.6
+**Date:** 2026-08-17
+**Author:** Martin Kecka
+**Status**: In Development
 
 ## 1. Introduction & Purpose 📜
 
@@ -14,47 +15,80 @@ The **HALO Admin Utility (HAU)** serves as the "Workstream 2: Administration & O
 
 **Business Outcome:** GTT obtains a single administration portal to onboard customers, provision tenants, deploy collectors, manage releases, monitor platform health, control feature availability, support customers, and manage the entire customer lifecycle through to billing.
 
-Unlike the internal SERA utilities (AMU, OMU, CMU), HAU manages external, customer-facing deployments, collectors, and AI inference pipelines (like Morpheus and Triton). Because HALO operates outside the standard SERA ecosystem, it implements its own independent monitoring, UI, and deployment abstractions.
+HAU is the headless execution engine and operational workhorse of the HALO ecosystem. While the HALO Admin Module (HAM) serves as the brain and presentation layer, HAU operates as the muscle. It strictly handles backend infrastructure provisioning, programmatic GitOps automation, NetBox API auditing, and semantic AI-driven changelog generation.
+
+Unlike the internal SERA/GIA utilities (AMU, OMU, CMU), HAU manages external, customer-facing deployments, collectors, and AI inference pipelines (like Morpheus and Triton). Because HALO operates outside the standard SERA/GIA ecosystem, it implements its own independent monitoring, UI, and deployment abstractions, natively interacting with the physical, on-premise hardware infrastructure to deploy localized AI workloads and enforce structural compliance across all customer tenants.
 
 ---
 
-## 2. Core Architectural Principles 🏗️
+## 2. Architecture & Ecosystem Integration 🏗️
 
-1. **Reused Utility Patterns:** HAU heavily borrows architectural concepts from the SERA ecosystem:
+HAU operates as an isolated, stateless microservice exposing a high-performance gRPC interface. It receives orchestration commands from the HAM frontend and translates them into physical repository mutations, direct Kubernetes state changes, or API gateway queries. The utility is engineered to execute complex, multi-stage workflows synchronously.
+
+**Core Architectural Principles:**
+1. **Reused Utility Patterns:** HAU heavily borrows architectural concepts from the SERA/GIA ecosystem:
     * **AMU Pattern:** GitOps-style configuration pushes to deployed environments and release management.
     * **CMU Pattern:** Logical configuration management, managing tenant feature flags, and product configurations.
     * **HMU Pattern:** Heavy infrastructure telemetry aggregation (tracking Kubernetes, AI pipelines, and LLM model performance).
-2. **Decoupled Execution & UI:** HAU serves as the headless execution engine (structured exactly like standard SERA utilities with a Click CLI and gRPC server). The web interface is completely offloaded to a dedicated **HALO Admin Module (HAM)** (FastAPI + React frontend), mirroring the SAM paradigm.
+2. **Decoupled Execution & UI:** HAU serves as the headless execution engine (structured exactly like standard SERA/GIA utilities with a Click CLI and gRPC server). The web interface is completely offloaded to a dedicated **HALO Admin Module (HAM)** (FastAPI + React frontend), mirroring the SAM paradigm.
 3. **CMD as Source of Truth:** Core customer, tenant, and billing lifecycle data is authoritative in CMD. HAU integrates directly with CMD to drive downstream provisioning.
 4. **Independent Deep Health Diagnostics:** HAU uses a bespoke asynchronous `ClusterHealthChecker` to evaluate backend dependencies (Redis and Netbox inside the `halo` namespace, vLLM) and fetches Kafka status remotely via OMU.
 
+```mermaid
+graph TD
+    HAM["HAM (WebUI/API)"] -- gRPC --> HAU["HAU gRPC Service"]
+    
+    subgraph HAU Core Execution
+    HAU --> DB[("PostgreSQL")]
+    HAU --> Git["GitLab API / Kustomize Overlays"]
+    HAU --> Reg["Docker Registry V2"]
+    HAU --> LLM["Local vLLM / Gemma-4-31B"]
+    end
+    
+    subgraph External Dependencies
+    HAU --> NB["NetBox API"]
+    HAU --> CMD["CMD API Gateway"]
+    Git --> Kube["Local H100 Kube Clusters"]
+    end
+```
+
+
+## 3. Module File Map 📂
+
+To maintain ecosystem consistency, the administration plane is decoupled. HAU is the backend Python microservice living in `/ai/utilities/halo_admin_utility`, acting as the execution engine for GitOps commits, state introspection, and background monitoring.
+
+* `halo_admin_utility.py`: The primary application entry point and bootstrap wrapper.
+* `cli/hau_cli.py`: The standardized Click-based command-line interface managing database initialization and local command execution.
+* `config/settings.yaml`: The centralized, declarative configuration defining gRPC endpoints, database DSNs, and local clone paths.
+* `core/database/`: SQLAlchemy ORM definitions mapping directly to the `ham_admin_prod_db` schema.
+* `core/io_handlers/`: Centralized database access enforcing a strict Repository pattern via `sql_reader.py` and `sql_writer.py` to decouple state from business logic. **No local filesystem sidecars (e.g., `metadata.json`) are utilized for state tracking.**
+* `core/llm_interface.py`: Facilitates programmatic interaction with the localized vLLM instances for reasoning tasks.
+* `core/managers/`: Decoupled client wrappers for external integrations (`gitlab_manager.py`, `kube_manager.py`, `netbox_audit_manager.py`, `container_registry_manager.py`, `prometheus_manager.py`, `vault_client.py`).
+* `core/orchestrators/`: Houses the multi-step domain logic executors (`release_orchestrator.py`, `inventory_orchestrator.py`, `changelog_orchestrator.py`).
+* `core/introspectors/`: Houses the `ClusterHealthChecker` logic.
+* `grpc_api/`: Protobuf definitions and the gRPC servicers (`hau_service.py`, `sera_standard_service.py`). The servicer acts strictly as a thin traffic cop, receiving payloads and routing them to the isolated domain orchestrators rather than executing direct business logic.
+
 ---
 
-## 3. Database Schema & State Management 🗄️
+## 4. Core Processing Lifecycle & Sub-Systems ⚙️
 
-HAU will manage state for provisioning and inventory that complements CMD.
-* **Tenant State:** Tracking the lifecycle from Onboarding -> AI Burn-in -> Go-Live Approval -> Billing.
-* **Collector Inventory:** Maintaining a live inventory mapping collectors to customer regions and HA pair configurations.
-* **Feature Management:** Storing specific Product Configurations and Tenant Feature toggles per TAD (Tenant Architecture Document).
-* **Git Inventory Cache:** Relational mapping of GitLab projects, branches, and container registry tags mapped natively against active Kubernetes workloads.
-* **Release & Audit Logging:** Immutable `GitReleaseAuditLog` tracking end-to-end pipeline execution, LLM changelog generation methods, container footprint scaling, and job telemetry.
+### 4.1. Core Processing
+* **Bootstrapping:** The module loads `settings.yaml` and initializes the gRPC server pool using `concurrent.futures.ThreadPoolExecutor`.
+* **Connection Pooling:** SQLAlchemy establishes a persistent connection pool to the underlying PostgreSQL database. State is strictly maintained within the relational database.
+* **Request Handling:** Inbound gRPC requests intercept the `x-client-id` metadata. The `HauServiceServicer` routes payloads to the designated orchestrators.
+* **Synchronous Execution:** Workflows (such as GitOps deployments or container retagging) are executed sequentially within the thread pool. The orchestrators yield execution states back to the client as stream responses to maintain real-time CLI/UI feedback. External background task queues are explicitly avoided to maintain tight, synchronous execution loops.
 
----
-
-## 4. Core Sub-Systems & Responsibilities ⚙️
-
-### 4.1. Tenant Lifecycle & Billing (CMD Integration)
+### 4.2. Tenant Lifecycle & Billing (CMD Integration)
 * **Tenant Management:** View all customer tenants with drill-down details sourced from CMD.
 * **Auto Tenant Provisioning:** Automatically provision new tenants from approved TADs.
 * **Go-Live Governance:** Manage the onboarding completion checklist and go-live approvals.
 * **Billing Readiness:** Strict state boundary to prevent billing from starting until onboarding and handover checks are fully complete.
 
-### 4.2. Infrastructure Provisioning & Inventory
-* **Collector Provisioning & Inventory:** Automatically provision collectors in the correct customer region and maintain a live inventory of all deployed locations.
-* **HA & Connectivity Management:** Configure and display HA collector pairs. Deploy virtual firewalls where collectors communicate over the internet, and configure/manage IPsec connectivity where required.
-* **Deployment Management:** Record all customer deployments, regions, and collector locations.
+### 4.3. Infrastructure Provisioning & Inventory
+* **Collector Provisioning Orchestration:** Triggers external API calls to the dedicated infrastructure team's provisioning endpoints to deploy standard, centrally-managed Docker image collectors in the correct customer region, maintaining a live inventory of those deployment states.
+* **HA & Connectivity:** Configure and display HA collector pairs. Deploy virtual firewalls where collectors communicate over the internet, and configure IPsec connectivity where required.
 
-### 4.3. Configuration & Feature Management (CMU/AMU Patterns)
+### 4.4. Configuration & Feature Management (CMU/AMU Patterns)
 HAU acts as the central orchestration "brain" that governs deployment state and configuration. HAU generates standard Kubernetes manifests and commits them to a dedicated control directory within the `halo-repository`. This incorporates a Geolocation Routing Layer to manage isolated customer tenants across global sites:
 
 The complete folder structure and operational patterns for the repository are detailed within the Halo repository's concept documentation (`deployment/docs/ecosystem/repo_concept.md`).
@@ -74,88 +108,167 @@ For the initial phase, to bypass strict ArgoCD linting rules on legacy monolithi
 * **Tenant Feature Management:** Enable/disable features per tenant based on TAD. Support different product configurations per customer.
 * **Release & Upgrade Management:** Controlled rollout of new functionality to selected customers. Schedule and execute tenant upgrades, tracking HALO release versions fleet-wide.
 
-### 4.4. AI & Monitoring Operations (HMU Pattern)
+### 4.5. AI & Monitoring Operations (HMU Pattern)
 * **AI Training Management:** Manage the AI burn-in and learning period before customer handover.
 * **Tenant Operations Dashboard:** Show onboarding status, collector health, tenant health, and deployment status.
 * **Monitoring & Telemetry:** Monitor pipelines (e.g., Netflow, Syslog DFP), integrations, and overall platform health (Kafka via OMU, vLLM, local Netbox/Redis).
 * **Monitoring Integration:** Forward actionable monitoring events (like UI crashes or backend degraded states) into external operational platforms (e.g., ME3 monitoring platform) via standard stateless webhooks/snmp/api, ensuring HAU remains decoupled from third-party API changes.
 
-### 4.5. User Administration & Access Control (RBAC)
+### 4.6. User Administration & Access Control (RBAC)
 * **Audit Logging:** All administrative actions (triggering deployments, toggling features, editing billing states) are logged against the authenticated user ID for security and compliance.
 
-### 4.6. AI-Driven Release Orchestration & Automated Changelogs
-HAU natively integrates `vLLMClient` and deep git introspection to automate the entire GitLab release lifecycle. The previously planned "Changelog Fragment" pattern has been completely superseded by a vastly superior **Dynamic Map-Reduce Generation** strategy, allowing changelogs to be generated dynamically from the git commit tree itself.
-* **Dynamic Changelog Generation:** HAU reads the exact code changes directly from Git (`git diff HEAD^1 HEAD`). For massive codebase changes (e.g., initial commits > 20k tokens), HAU automatically falls back to a **Map-Reduce** pipeline. It chunks the file diffs into 500-line blocks, uses the LLM to extract features (Map), and merges them into a clean semantic YAML document (Reduce). This provides an ultimate "safety net"—even if developers write zero changelogs or vague commit messages, the exact semantic intent of the code is flawlessly documented.
-* **End-to-End Orchestration:** HAU automates the transition from feature branches to target branches. It dynamically creates GitLab Merge Requests, actively streams CI/CD pipeline job traces directly to the CLI, and handles automated retries.
-* **Artifact & Release Management:** Upon successful pipeline completion, HAU utilizes the Docker V2 API to instantly retag built images to semantic versions without a rebuild. It establishes an immutable Git Tag and pushes the AI-generated semantic YAML into a formatted, native GitLab Release payload.
+---
+
+## 5. Detailed Business Logic & Rules 🧠
+
+* **GitOps Release Orchestration:** HAU orchestrates the automated promotion of code from `dev` to `main`. It compares branches, creates merge requests via the GitLab API, monitors CI/CD pipelines, automatically retags Docker V2 containers upon success (without a rebuild), establishes an immutable Git Tag, and pushes generated semantic YAML into a native GitLab Release payload.
+* **Inventory Synchronization:** Retrieves active Kubernetes workloads across physical nodes (Deployments, Pods, ConfigMaps, Ingresses) and reconciles them against the GitLab Container Registry to map live tags to localized namespaces.
+* **Internal NetBox Auditing:** Queries the internal NetBox purely for internal auditing and validation (cross-referencing custom fields like `cmd_slid`, `cmd_gnid` against the CMD API Gateway to identify misaligned network codes or missing A-Site IP configurations). The actual synchronization of data from the internal NetBox down into the isolated HALO tenant's NetBox is handled natively by the HALO application itself, keeping HAU decoupled from tenant data-plane syncs.
+---
+
+## 6. AI, LLM & Machine Learning Execution 🤖
+
+HAU leverages localized AI factory reasoning models (e.g., Gemma-4-31B) specifically for GitOps automation. 
+* **Semantic Changelog Generation:** HAU executes a `git diff HEAD^1 HEAD` on incoming merge requests. The raw code diff is injected into the prompt. Identifiers inside changelogs are dynamically loaded from configuration, explicitly avoiding hardcoded utility names.
+* **Map-Reduce Architecture:** To prevent context window collapse on massive commits (>20k tokens), the `ChangelogOrchestrator` chunks file diffs into 500-line blocks. It executes an extraction prompt (Map) across all blocks concurrently, and then merges the extracted features (Reduce) into a clean, standardized semantic YAML format.
+* **Determinism:** The LLM client (`vLLMClient`) enforces a low temperature (0.2) to maintain strict formatting and prevent hallucinations during documentation generation. This guarantees exact semantic intent is documented even if developer commit messages are vague.
+* **Human-in-the-Loop (HITL) Release Validation:** HAU intercepts merges, generates semantic YAML via LLM for UI review, and only upon operator approval commits to `CHANGELOG.yaml` and initiates the orchestration pipeline.
+* **LLM-Driven Incremental Documentation Auto-Updates:** HAU uses a Semantic Section Replacement architecture. The LLM evaluates if an update is needed based on the generated changelog, rewrites only the affected section, and a Python parser dynamically splices it back into the Markdown file.
 
 ---
 
-## 5. Module Structure 📂
+## 7. Data Models, State & Storage 🗄️
 
-To maintain ecosystem consistency, the administration plane is decoupled into two distinct components, mirroring the relationship between the standard SERA utilities and the SERA Admin Module (SAM):
+HAU fundamentally rejects file-system-based state management. All tracking is managed through the highly relational `ham_admin_prod_db` PostgreSQL database. It manages state for provisioning and inventory that complements CMD.
 
-### 1. HALO Admin Utility (HAU)
-The headless, backend Python microservice living in `/ai/utilities/halo_admin_utility`. It acts as the execution engine for GitOps commits, state introspection, and background monitoring.
-* `core/introspectors/`: Houses the `ClusterHealthChecker` logic. Kafka status is obtained via gRPC call to OMU. Netbox and Redis are checked directly within the `halo` namespace using internal logic.
-* `core/io_handlers/`: Centralized database access enforcing a strict Repository pattern via `SQLReader` and `SQLWriter` to decouple state from business logic.
-* `core/orchestrators/`: Domain-specific business logic executors (`ChangelogOrchestrator`, `ReleaseOrchestrator`, `InventoryOrchestrator`).
-* `core/managers/`: Decoupled client wrappers for external integrations (`GitlabManager`, `GitPipelineManager`, `ContainerRegistryManager`, `VaultClient`, `PrometheusManager`).
-* `grpc_api/`: The gRPC interfaces. The servicer (`hau_service.py`) acts strictly as a thin traffic cop, receiving payloads and routing them to the isolated domain orchestrators rather than executing direct business logic.
-* `cli/hau_cli.py`: Standardized Click-based command-line interface.
+### 7.1. Core Entities
+* **HaloTenant & TenantCustomization**: Maps overarching namespace structures to explicit JSON configuration payloads. Tracks lifecycle from Onboarding -> AI Burn-in -> Go-Live -> Billing.
+* **GitProject, GitBranch, GitContainer**: Persists the high-speed cache of the GitLab repository hierarchy, linking branches with active container images and pre-releases.
+* **GitReleaseAuditLog**: An immutable ledger recording every GitOps orchestration event, tracking the actor, action, associated merge request ID, container footprint scaling, job telemetry, and success/failure status.
+* **FeatureCatalog**: Dynamically tracks `product_category`, `ui_grouping`, `gitops_dependencies`, and complex `pricing_tiers` matrices for Halo ecosystem features.
 
-### 2. HALO Admin Module (HAM)
-The dedicated user interface living in a separate `/ai/halo_admin_module` directory, structured identically to the highly mature SERA Admin Module (SAM).
-* `rest_api/`: The FastAPI layer exposing REST endpoints to the UI and acting as the aggregator.
-* `core/connectors/`: Dedicated gRPC client wrappers. Beyond `hau_connector.py` for HALO-specific provisioning, HAM reuses standard SERA ecosystem utilities by integrating `hmu_connector.py` (vLLM/Triton AI engine monitoring), `cmu_connector.py` (global configuration), and `omu_connector.py` (Kafka/Patroni stateful status) to prevent rebuilding existing logic.
-* `ui/`: The Vite + React dashboard containing modular features where GTT operators interact with the Tenant Operations Dashboard, Go-Live checklists, and collector inventory maps.
+### 7.2. Tenant Policy & Customization Architecture
+
+HAU separates **Discovered State** (live Kubernetes telemetry) from **Desired Configuration** (governance and policy rules). 
+The `TenantCustomization` architecture establishes HAU as the absolute Source of Truth for tenant behavior, enabling the "Rubber Band" sandbox model, accurate UI categorization, and automated lifecycle management.
+
+#### Database Schema
+The database schema uses a 1:1 relational model tying the discovered `HaloTenant` to a strict configuration definition (`TenantCustomization`).
+
+| Column | Type | Purpose / Allowable Values |
+| :--- | :--- | :--- |
+| `tenant_id` | `String (FK)` | One-to-One mapping to `HaloTenant`. |
+| `tenant_category` | `String` | Visually groups the tenant in the UI (`INTERNAL`, `CUSTOMER`). |
+| `tenant_tier` | `String` | Defines the operational blast radius (`SANDBOX`, `STAGING`, `PRODUCTION`, `SYSTEM_CORE`). |
+| `update_policy` | `String` | Deployment governance (`AUTO_LATEST`, `GATED_RELEASE`, `MANUAL_ONLY`). |
+| `owner` | `String` | The designated GitLab user or SysEng owner responsible for the tenant. |
+| `purpose` | `String` | Brief description of the tenant's existence (solves sandbox garbage collection). |
+| `maintenance_window` | `String` | CRON or schedule string for acceptable disruption periods. |
+| `configuration_payload`| `JSON` | A dynamic blob holding all non-discoverable configurations (e.g., custom vanity domains, infrastructure quotas, environment variables, application toggles). |
+| `component_versions` | `JSON` | Stores explicit component container version pins for tenant environments. |
+
+#### Strict Synchronization Boundaries & Category Inference
+The `InventoryOrchestrator` handles background synchronization with Kubernetes clusters but is strictly barred from modifying deployment policies or categories.
+* **Best-Effort Inference**: When the orchestrator discovers a brand-new namespace, it runs a keyword string-match on the namespace name. If it detects keywords like `corp`, `core`, or `dev`, it sets the initial `tenant_category` to `INTERNAL`. Otherwise, it defaults to `CUSTOMER`. It sets fail-safe defaults for the rest (`tenant_tier = UNKNOWN`, `update_policy = MANUAL_ONLY`).
+* **Immutability & Permanent Overrides**: The sync logic *only* updates live telemetry (active pods, image tags, cluster IP). It never overwrites the `tenant_category`, `update_policy`, `tenant_tier`, or `owner`. If the UI is used to correct a miscategorized tenant (e.g., changing `halo-democorp` to `INTERNAL`), that UI action becomes the permanent Source of Truth, completely eliminating the need for complex `is_overridden` flags.
+
+#### The "Rubber Band" Sandbox Workflow
+This architecture natively supports flexible, self-cleaning developer sandboxes by combining the `TenantCustomization` state with the `ReleaseOrchestrator`.
+
+1. **Baseline Execution**: A developer sandbox is configured with `update_policy = AUTO_LATEST` tracking the `dev` branch.
+2. **Manual Override (Stretch)**: The developer uses the UI to deploy a specific feature branch container to their namespace. The orchestrator rewrites the Kustomize overlay to pin the feature image. The sandbox diverges from the baseline.
+3. **Auto Snap-Back (Release)**: The `ReleaseOrchestrator` concludes the CI/CD pipeline, retrieves all tenants where `update_policy == AUTO_LATEST` (and matching the target environment), rewrites their Kustomize manifests to the new merged `dev` tag, and deploys. The manual override is wiped out, and the environment snaps back to the standardized baseline.
+
+### 7.3. Feature Catalog & Auto-Sync Workflow
+
+To decouple the UI from raw frontend environment variables, HAU implements a `FeatureCatalog` database table. When a developer builds a new UI capability, they update a `feature-manifest.yaml` in the frontend repo. Upon merge, HAU's `ReleaseOrchestrator` fetches this YAML and upserts the definitions into the database, instantly populating the HAM UI provisioning screen with descriptions and infrastructure dependencies with zero administrative overhead.
 
 ---
 
-## 6. Independent Diagnostics Engine (Monitoring) 🔍
+## 8. APIs, Observability & Communication Contracts 📡
 
-To monitor the external HALO dependencies, HAU utilizes a bespoke asynchronous HTTP/RPC probing architecture (`ClusterHealthChecker`):
-* **Kafka Telemetry:** Fetched remotely via OMU gRPC connector.
-* **Redis Analytics:** Asynchronously executes `INFO memory` and `INFO clients` to parse peak memory usage and client saturation.
-* **vLLM & Local Data Services (Netbox/Redis):** Internal probes within the `halo` namespace to verify data-plane responsiveness.
-* **UI Crash Reporting:** A dedicated endpoint (`/api/diagnostics/ui-crash`) allowing the React frontend to report unhandled exceptions directly to the backend telemetry state.
+* **Ingress (gRPC):** Exposes standard SERA/GIA contracts (`GetAppInfo`, `GetDeepHealth`) and domain-specific endpoints (`GitRelease`, `InventorySync`, `NetboxAuditTenant`, `UpsertFeature`).
+* **Egress (REST/GraphQL):** Executes high-volume outgoing requests to GitLab via GraphQL (utilizing cursor-based pagination to bypass node limits) and standard REST calls to NetBox, CMD, and the Docker V2 Registry.
+* **Independent Diagnostics Engine:** HAU utilizes a bespoke asynchronous HTTP/RPC probing architecture (`ClusterHealthChecker`). Kafka telemetry is fetched remotely via OMU. Redis analytics asynchronously parse peak memory and client saturation. vLLM and Netbox probes verify data-plane responsiveness within the `halo` namespace.
+* **Telemetry Logging:** Logs are standardized and piped directly to stdout for centralized Loki ingestion. Extraneous debugging tokens (e.g., `num_tokens=1` debug logs) are strictly filtered out to prevent log saturation during execution state analyses. Metrics accurately handle cordoned Kubernetes nodes, reporting 0% utilization rather than freezing at 100%.
 
 ---
 
-## 7. Future Enhancements & Roadmap 🚀
+## 9. User Interface (UI) & Visualizations 🖥️
 
-### 7.1. Component-Level GitOps Release Orchestration
-To enable seamless and granular upgrades across multiple tenants, HAU will act as a true GitOps Release Orchestrator leveraging the GitLab Container Registry. Instead of a monolithic rollout, each application component (`backend`, `dashboard`, `syslog-dfp`, etc.) will have its independent container versioning lifecycle (`dev`, `main`, tags).
+HAU operates as a headless utility. All data presentation and dashboarding are executed by the HALO Admin Module (HAM), a Vite + React application.
 
-**Implementation Strategy:**
-1. **Container Release Tracking:** HAU will monitor the GitLab Container Registry (via API or webhooks) to track the availability of new container tags for each individual component. This state will be stored in the HAU database to construct a "Release Matrix."
-2. **Dynamic Kustomize Overrides:** When an operator decides to bump a tenant's component version (e.g., upgrading `tenant-acme`'s dashboard to `v1.2.0`), HAU will modify the tenant's specific `kustomization.yaml` file (rewriting the `images:` block to point to the new registry tag).
-3. **Phased / Canary Rollouts:** By updating only a specific tenant's GitOps state, HAU can safely deploy a new container version to a `halo-dev` tenant, monitor its stability, and then gradually roll out the patch across the rest of the fleet without risking global disruption.
+**Generic UI & Backend Application Architecture Guidelines:**
+To ensure reliability across both frontend UI applications and backend data structures, documentation and architecture patterns must remain generic and extensible. HAU provides dedicated endpoints (e.g., `/api/diagnostics/ui-crash`) allowing the React frontend to report unhandled exceptions directly to the backend telemetry state. HAM aggregates data by connecting to HAU for provisioning, HMU for vLLM telemetry, CMU for global configuration, and OMU for Kafka/Patroni status.
 
-### 7.2. Intelligent LLM Codebase Validation (Code Review)
-Since HAU natively possesses `vLLMClient` integrations and advanced codebase chunking/diffing mechanics, we can expand its role beyond just changelog generation into **Intelligent Code Validation**.
+---
 
-While standard GitLab CI/CD pipelines are excellent for static linting and unit testing, they lack deep contextual awareness. HAU could eventually act as an automated "Senior Developer" during the merge lifecycle:
-* **Semantic Code Review:** When a developer proposes a merge, HAU's LLM pipeline can review the `git diff` for logical flaws, security vulnerabilities, or anti-patterns that static analysis tools miss.
-* **Contextual Quality Gates:** HAU can evaluate whether the code changes actually fulfill the intent described in the commit messages or linked tickets.
-* **Automated Feedback:** Providing direct, actionable feedback to the developer before the merge is approved, ensuring only high-quality code enters the `dev` and `main` branches.
+## 10. Background Services & Workers 🛠️
 
-### 7.3. Human-in-the-Loop (HITL) Release Validation & Merge Control
-To ensure absolute accuracy in customer-facing release notes (preventing LLM hallucinations) and to integrate release generation seamlessly into the developer lifecycle without friction, HAU will split the release workflow into a two-phase execution model when the UI (HAM) is fully implemented:
+HAU utilizes native Python `ThreadPoolExecutor` capabilities to manage concurrent API requests, particularly when executing bulk NetBox audits or parallelizing GraphQL fetches. External background task queues (e.g., Celery) are explicitly omitted; synchronous execution loops are highly sufficient given the architecture's workload volumes, eliminating unnecessary infrastructure complexity.
 
-1. **Phase 1: Merge Interception (Draft & Preview):** When a developer initiates a merge from `feature` to `dev`, HAU intercepts the merge. It syncs the repository, generates the semantic YAML changelog via the LLM against the feature branch's diff, and returns the proposed payload to the frontend *without* making any git commits.
-2. **Phase 2: Validation (Execute & Orchestrate):** The generated semantic YAML is presented to the developer (or operator) in the UI for validation or manual tweaking. Upon clicking "Approve & Release", the UI sends the finalized YAML back to HAU, which automatically prepends the validated YAML to the repository's master `docs/CHANGELOG.yaml`, and executes the `git commit`, `git push`, and GitLab MR creation in one atomic transaction.
+---
 
-This pattern shifts HAU from a "zero-touch automation" tool to an "automation-assisted" control plane, ensuring perfect changelog hygiene with absolutely zero merge conflicts and zero developer overhead.
+## 11. CLI, Tooling & Testing 💻
 
-### 7.4. LLM-Driven Incremental Documentation Auto-Updates
-To keep ecosystem design documentation (`_design.md`) perfectly synchronized with codebase evolution, HAU will automatically propose documentation updates during the Git Release lifecycle.
+The `hau_cli.py` provides a robust, developer-centric interface for localized command execution grouped by domain:
 
-Rather than forcing the LLM to rewrite entire `.md` files—which is token-heavy and risks formatting regressions—HAU will leverage a **Semantic Section Replacement** architecture. 
+* **Core Services**:
+  * `start-grpc-server`: Boots the primary networking interface.
+  * `init-db`: Automates the generation of PostgreSQL tables via SQLAlchemy metadata (use `--force` to wipe and reset).
+* **GitOps (`hau git`)**:
+  * `release`: Exposes a direct CLI wrapper for the GitOps orchestration engine, capable of initiating dry-runs and tracking pipelines.
+  * `retry`: Retries failed GitLab pipelines and resumes release orchestration.
+  * `sync-inventory`: Fetches and bulk-upserts the entire GitLab repository hierarchy into the local PostgreSQL database.
+  * `inventory`: Presents a unified topological tree of GitLab resources, seamlessly linking branches with built container images.
+  * `audit`: Extracts formatted, highly detailed YAML telemetry for any release.
+  * `delete`: Safely deletes feature branches and container registry tags with inventory safety checks.
+* **Changelogs (`hau changelog`)**:
+  * `generate`: Triggers automated semantic changelog extraction for a specific branch.
+  * `sync`: Efficiently updates semantic release notes by fetching missing versions.
+  * `backfill`: Streams the historical generation of semantic YAML documentation for legacy repositories.
+* **Inventory (`hau inventory`)**:
+  * `list`: Displays a deep hierarchical view of computational resources per tenant namespace.
+  * `delete-orphaned`: Manually purges orphaned or decommissioned tenants and their associated customizations.
+* **Features (`hau features`)**:
+  * `list`: Outputs the dynamic configuration catalog.
+  * `upsert`: Dynamically manipulates feature toggles and pricing tiers.
+* **NetBox (`hau netbox`)**:
+  * `audit-tenant`: Queries NetBox directly for devices and VMs to identify misaligned network codes or mismatched tenants.
 
-Because all HALO documentation strictly adheres to the 13-point mandatory structure defined in `docs_concept.md`, the LLM interaction becomes highly precise and deterministic:
-1. **Decision Phase:** The LLM reads the freshly generated `CHANGELOG.yaml` and the existing `_design.md` document, determining *if* an update is warranted, and explicitly identifying *which* of the 13 strict sections (e.g., `5. Detailed Business Logic & Rules`) require modifications.
-2. **Focused Rewrite:** If an update is required, the LLM reads the raw Git commit diffs for deep technical context, and generates a completely rewritten payload for **only** that specific section.
-3. **Deterministic Splice:** A Python parser within `release_orchestrator.py` dynamically splices the LLM's rewritten section back into the Markdown file using regex header matching, leaving the rest of the document completely untouched.
+---
 
-This architecture guarantees 0% hallucination for unaffected sections, perfectly preserves mandatory document structures, and leverages local high-compute (24x H100 GPUs) specifically for extreme precision in targeted contextual rewriting.
+## 12. Configuration, Security & Hardware Affinity 🔒
+
+| Environment Variable | Purpose | Default Value |
+| :--- | :--- | :--- |
+| `system_services.grpc.port` | Bound network port for the gRPC listener | `50121` |
+| `database.write_dsn` | Connection string for persistent state tracking | `postgresql://...` |
+| `external_services.gitlab.project_path` | Target boundary for GitLab operations | `ai/halo` |
+| `llm_engines.primary.model` | The designated reasoning model for changelogs | `google/gemma-4-31B-it` |
+
+**Hardware Affinity & Scaling:** Scaling mechanisms are strictly bounded by physical, on-premise hardware availability. Deployments explicitly target localized H100 physical hardware clusters in specific regions (e.g., Prague, NYC, SLO). HAU relies on accurate configuration mapping to deploy pods to available hardware, explicitly rejecting assumptions regarding infinite cloud elasticity.
+
+---
+
+## 13. Future Enhancements & Roadmap 🚀
+
+### 13.1. Component-Level GitOps Release Orchestration
+To enable seamless and granular upgrades across multiple tenants, HAU will act as a true GitOps Release Orchestrator leveraging the GitLab Container Registry. Each application component will have its independent container versioning lifecycle. By rewriting the `images:` block in a specific tenant's `kustomization.yaml`, HAU will support Phased / Canary Rollouts natively.
+
+### 13.2. Dynamic Tenant Scaffolding (GitOps Automation)
+Instead of operators manually copying Kustomize overlays, HAU will natively auto-generate the complete GitOps directory structure for new tenants upon receiving a gRPC provisioning request.
+* **Deterministic Structure Generation:** Auto-scaffold `/tenants/<region>/<tenant-name>/` creating explicit `app/` and `gpu/` sub-directories.
+* **Unified Smart Patching:** Write unified, multi-target patches to reduce file count.
+* **Secretless GitOps:** Ensure environmental secrets are injected at runtime via Vault, never written as raw Kustomize patches.
+
+### 13.3. Intelligent LLM Codebase Validation
+HAU will evolve from passive changelog generation to active semantic code review. HAU will evaluate `git diffs` during the merge request phase to detect logical flaws, security vulnerabilities, or architectural anti-patterns that standard static analysis tooling misses, acting as an automated "Senior Developer".
+
+### 13.4. Human-in-the-Loop (HITL) Release Validation
+To ensure absolute accuracy in customer-facing release notes, HAU will split the release workflow:
+1. **Merge Interception:** Intercepts the merge, generates semantic YAML via LLM, and returns it to the UI without committing.
+2. **Validation:** The operator validates/tweaks the YAML in the UI. Upon approval, HAU atomic-commits the YAML to `CHANGELOG.yaml`, creates the MR, and orchestrates the pipeline.
+
+### 13.5. LLM-Driven Incremental Documentation Auto-Updates
+Leveraging the strict 13-point mandatory documentation structure, HAU will use a Semantic Section Replacement architecture. The LLM evaluates if an update is needed based on the generated changelog, completely rewrites *only* the affected specific section, and a Python parser dynamically splices it back into the Markdown file using regex header matching.

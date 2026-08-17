@@ -156,3 +156,8 @@ Taking inspiration from the originally planned SAM configuration backend, CMU ac
 While CMU already natively implements intelligent on-demand volume capacity calculation (`--size auto`), it will eventually run an autonomous worker to completely automate expansion.
 * **The Logic:** Scans ecosystem PVCs on a cron schedule via the existing `VolumesScan` PromQL-powered pipeline. 
 * **The Audit Threshold:** Integrates with the `cmu_audit_log`. If a specific PVC triggers the auto-expansion rule more than 3 times consecutively, CMU will halt auto-expansion for that volume and trigger an email alert via OMU to prevent uncontrolled storage inflation.
+
+### 7.5. Keycloak Client Audit Tracking
+To provide long-term historical tracking of Keycloak client usage (e.g., active sessions and last login timestamps over 1 year ago), CMU will introduce a PostgreSQL table to track usage.
+* **The Logic:** A daily cron-sync will fetch active usage data from Keycloak's Admin API and persist it locally in CMU.
+* **Data Retention:** The database will employ a 6-month auto-purge policy to maintain storage efficiency while still providing deep usage history unavailable in native Keycloak.

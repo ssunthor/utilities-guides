@@ -3,7 +3,7 @@
 **Version:** 0.4.9
 **Date:** 2026-07-08
 **Author:** Martin Kecka & Gemini AI
-**Category:** (U) Utility / Administrative
+**Category:** (AM) Admin Module
 **Acronym:** SAM
 
 ## 1. Introduction & Purpose
