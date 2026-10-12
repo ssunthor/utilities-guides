@@ -32,7 +32,7 @@ HAU operates as an isolated, stateless microservice exposing a high-performance 
     * **HMU Pattern:** Heavy infrastructure telemetry aggregation (tracking Kubernetes, AI pipelines, and LLM model performance).
 2. **Decoupled Execution & UI:** HAU serves as the headless execution engine (structured exactly like standard SERA/GIA utilities with a Click CLI and gRPC server). The web interface is completely offloaded to a dedicated **HALO Admin Module (HAM)** (FastAPI + React frontend), mirroring the SAM paradigm.
 3. **CMD as Source of Truth:** Core customer, tenant, and billing lifecycle data is authoritative in CMD. HAU integrates directly with CMD to drive downstream provisioning.
-4. **Independent Deep Health Diagnostics:** HAU uses a bespoke asynchronous `ClusterHealthChecker` to evaluate backend dependencies (Redis and Netbox inside the `halo` namespace, vLLM) and fetches Kafka status remotely via OMU.
+4. **Tenant Diagnostics Aggregation:** HAU actively queries the tenant's Halo Backend via REST (`/api/diagnostics/health`) to retrieve internal dependency states and executes targeted PromQL queries against the Kubernetes Prometheus operator to fetch AI pipeline throughput and anomaly metrics.
 
 ```mermaid
 graph TD
@@ -57,16 +57,69 @@ graph TD
 
 To maintain ecosystem consistency, the administration plane is decoupled. HAU is the backend Python microservice living in `/ai/utilities/halo_admin_utility`, acting as the execution engine for GitOps commits, state introspection, and background monitoring.
 
-* `halo_admin_utility.py`: The primary application entry point and bootstrap wrapper.
-* `cli/hau_cli.py`: The standardized Click-based command-line interface managing database initialization and local command execution.
-* `config/settings.yaml`: The centralized, declarative configuration defining gRPC endpoints, database DSNs, and local clone paths.
-* `core/database/`: SQLAlchemy ORM definitions mapping directly to the `ham_admin_prod_db` schema.
-* `core/io_handlers/`: Centralized database access enforcing a strict Repository pattern via `sql_reader.py` and `sql_writer.py` to decouple state from business logic. **No local filesystem sidecars (e.g., `metadata.json`) are utilized for state tracking.**
-* `core/llm_interface.py`: Facilitates programmatic interaction with the localized vLLM instances for reasoning tasks.
-* `core/managers/`: Decoupled client wrappers for external integrations (`gitlab_manager.py`, `kube_manager.py`, `netbox_audit_manager.py`, `container_registry_manager.py`, `prometheus_manager.py`, `vault_client.py`).
-* `core/orchestrators/`: Houses the multi-step domain logic executors (`release_orchestrator.py`, `inventory_orchestrator.py`, `changelog_orchestrator.py`).
-* `core/introspectors/`: Houses the `ClusterHealthChecker` logic.
-* `grpc_api/`: Protobuf definitions and the gRPC servicers (`hau_service.py`, `sera_standard_service.py`). The servicer acts strictly as a thin traffic cop, receiving payloads and routing them to the isolated domain orchestrators rather than executing direct business logic.
+```text
+/ai/utilities/halo_admin_utility/
+├── cli/                            # Command line interface grouped by domain
+│   ├── commands/                   
+│   │   ├── changelog_cmds.py       # Domain-specific CLI commands for semantic changelog generation
+│   │   ├── features_cmds.py        # Domain-specific CLI commands to upsert and list feature catalogs
+│   │   ├── git_cmds.py             # Domain-specific CLI commands for managing Git releases, deletions, and pipelines
+│   │   ├── inventory_cmds.py       # Domain-specific CLI commands for syncing and displaying tenant inventory
+│   │   ├── module_cmds.py          # Standard module operational status and health commands
+│   │   └── netbox_cmds.py          # Domain-specific CLI commands for cross-referencing NetBox audits
+│   └── hau_cli.py                  # Main CLI entry point utilizing Click to group sub-commands
+├── config/                         
+│   └── settings.yaml               # Standard ecosystem configuration defining the main source of truth for all variables
+├── core/                           
+│   ├── clients/                    
+│   │   ├── netbox_client.py        # Dedicated external API client for interacting with the NetBox
+│   │   └── vault_client.py         # Dedicated external API client for securely fetching secrets from Vault
+│   ├── connectors/                 
+│   │   └── cmc_connector.py        # gRPC client logic to communicate with the CMD Connector for tenant architecture data
+│   ├── database/                   
+│   │   ├── database.py             # Database engine and SQLAlchemy session factory initialization
+│   │   └── models.py               # SQLAlchemy ORM data models representing tenants, customizations, and audit logs
+│   ├── io_handlers/                
+│   │   ├── sql_reader.py           # Handles reading operational state and configuration from the PostgreSQL database
+│   │   └── sql_writer.py           # Handles writing and upserting data (e.g. features, telemetry) into PostgreSQL
+│   ├── managers/                   
+│   │   ├── container_registry_manager.py # Logic for interacting with the Docker Registry V2
+│   │   ├── git_inventory_manager.py      # Synchronizes and caches Git branch and image tag inventory
+│   │   ├── gitlab_manager.py             # Wrapper for general GitLab API operations
+│   │   ├── git_pipeline_manager.py       # Logic for creating Merge Requests and triggering/polling CI pipelines
+│   │   ├── kube_manager.py               # Interacts with Kubernetes clusters via standard API to introspect workloads
+│   │   ├── netbox_audit_manager.py       # Cross-references NetBox data against CMD for A-Site audits
+│   │   └── prometheus_manager.py         # Executes targeted PromQL queries against cluster Prometheus instances
+│   ├── orchestrators/              
+│   │   ├── changelog_orchestrator.py # Manages the multi-step map-reduce LLM pipeline for changelog generation
+│   │   ├── delete_orchestrator.py    # Orchestrates safe deletion of features across Git and Kubernetes
+│   │   ├── inventory_orchestrator.py # Orchestrates the synchronization of Kubernetes states into the local DB
+│   │   └── release_orchestrator.py   # Governs the entire GitOps release cycle and Kustomize generation
+│   └── llm_interface.py            # Handles programmatic interaction with the localized vLLM instances for reasoning
+├── docs/                           
+│   ├── CHANGELOG.yaml              # Track changes and version history
+│   └── hau_design.md               # Main architecture document describing the module design
+├── grpc_api/                       
+│   ├── protos/                     # Local .proto definitions for the utility
+│   │   └── hau.proto               # Domain-specific gRPC definitions
+│   ├── generate_stubs.py           # Python script to compile .proto files into stubs
+│   ├── hau_service.py              # Domain-specific gRPC service implementation for GitOps and inventory
+│   ├── sera_standard_service.py    # Required SERA standard implementation (AppInfo, DeepHealth)
+│   └── services.py                 # Traffic cop routing gRPC payloads to orchestrators
+├── prompts/                        
+│   ├── changelog_prompt.py         # LLM prompt template for semantic changelog extraction
+│   ├── extract_features_prompt.py  # LLM prompt template for extracting feature matrices
+│   ├── git_commit_prompt.py        # LLM prompt template for standardizing Git commit messages
+│   └── merge_changelog_prompt.py   # LLM prompt template for merging chunked file diffs
+├── scripts/                        # Maintenance and one-off scripts (e.g., kustomize builders, data migration)
+├── utils/                          
+│   ├── config_loader.py            # Standardized function to load settings.yaml
+│   └── logging_setup.py            # Standardized logging definition setup
+├── bootstrap_helper.py             # Standard initialization script managing virtual environments and dependencies
+├── halo_admin_utility.py           # Main application entry point that bootstraps the service and CLI
+├── README.md                       # High-level overview of the utility with links to core documentation
+└── requirements.txt                # Python package dependencies
+```
 
 ---
 
@@ -85,7 +138,7 @@ To maintain ecosystem consistency, the administration plane is decoupled. HAU is
 * **Billing Readiness:** Strict state boundary to prevent billing from starting until onboarding and handover checks are fully complete.
 
 ### 4.3. Infrastructure Provisioning & Inventory
-* **Collector Provisioning Orchestration:** Triggers external API calls to the dedicated infrastructure team's provisioning endpoints to deploy standard, centrally-managed Docker image collectors in the correct customer region, maintaining a live inventory of those deployment states.
+* **Collector Provisioning Orchestration (Planned):** Triggers external API calls to the dedicated infrastructure team's provisioning endpoints to deploy standard, centrally-managed Docker image collectors in the correct customer region, maintaining a live inventory of those deployment states.
 * **HA & Connectivity:** Configure and display HA collector pairs. Deploy virtual firewalls where collectors communicate over the internet, and configure IPsec connectivity where required.
 
 ### 4.4. Configuration & Feature Management (CMU/AMU Patterns)
@@ -111,7 +164,7 @@ For the initial phase, to bypass strict ArgoCD linting rules on legacy monolithi
 ### 4.5. AI & Monitoring Operations (HMU Pattern)
 * **AI Training Management:** Manage the AI burn-in and learning period before customer handover.
 * **Tenant Operations Dashboard:** Show onboarding status, collector health, tenant health, and deployment status.
-* **Monitoring & Telemetry:** Monitor pipelines (e.g., Netflow, Syslog DFP), integrations, and overall platform health (Kafka via OMU, vLLM, local Netbox/Redis).
+* **Monitoring & Telemetry:** Monitor pipelines (e.g., Netflow, Syslog DFP), integrations, and overall platform health (vLLM, local Netbox/Redis). Monitoring Kafka via OMU is **(Planned)**.
 * **Monitoring Integration:** Forward actionable monitoring events (like UI crashes or backend degraded states) into external operational platforms (e.g., ME3 monitoring platform) via standard stateless webhooks/snmp/api, ensuring HAU remains decoupled from third-party API changes.
 
 ### 4.6. User Administration & Access Control (RBAC)
@@ -187,19 +240,16 @@ To decouple the UI from raw frontend environment variables, HAU implements a `Fe
 
 ## 8. APIs, Observability & Communication Contracts 📡
 
-* **Ingress (gRPC):** Exposes standard SERA/GIA contracts (`GetAppInfo`, `GetDeepHealth`) and domain-specific endpoints (`GitRelease`, `InventorySync`, `NetboxAuditTenant`, `UpsertFeature`).
-* **Egress (REST/GraphQL):** Executes high-volume outgoing requests to GitLab via GraphQL (utilizing cursor-based pagination to bypass node limits) and standard REST calls to NetBox, CMD, and the Docker V2 Registry.
-* **Independent Diagnostics Engine:** HAU utilizes a bespoke asynchronous HTTP/RPC probing architecture (`ClusterHealthChecker`). Kafka telemetry is fetched remotely via OMU. Redis analytics asynchronously parse peak memory and client saturation. vLLM and Netbox probes verify data-plane responsiveness within the `halo` namespace.
-* **Telemetry Logging:** Logs are standardized and piped directly to stdout for centralized Loki ingestion. Extraneous debugging tokens (e.g., `num_tokens=1` debug logs) are strictly filtered out to prevent log saturation during execution state analyses. Metrics accurately handle cordoned Kubernetes nodes, reporting 0% utilization rather than freezing at 100%.
+* **Ingress (gRPC):**
+  * **SERA Standard:** Exposes standard contracts (`GetAppInfo`, `GetDeepHealth`) for overarching ecosystem tools to monitor the internal health of the HAU microservice itself.
+  * **Domain Specific:** Exposes execution endpoints (`GitRelease`, `InventorySync`, `NetboxAuditTenant`, `UpsertFeature`, and `GetTenantDeepHealth`) utilized by the HAM frontend. HAU actively queries the tenant's Halo Backend (`/api/diagnostics/health`) to retrieve dependency states (Redis, Kafka, UI crashes), and executes targeted PromQL queries against the cluster's Prometheus server to extract isolated telemetry (throughput, AI anomaly loss) natively from the Morpheus pipelines.
+* **Egress (REST/GraphQL/gRPC):** Executes high-volume outgoing requests to GitLab via GraphQL (utilizing cursor-based pagination to bypass node limits), standard REST calls to NetBox and the Docker V2 Registry, and gRPC queries to the central CMD database via the `cmc_connector`.
 
 ---
 
 ## 9. User Interface (UI) & Visualizations 🖥️
 
-HAU operates as a headless utility. All data presentation and dashboarding are executed by the HALO Admin Module (HAM), a Vite + React application.
-
-**Generic UI & Backend Application Architecture Guidelines:**
-To ensure reliability across both frontend UI applications and backend data structures, documentation and architecture patterns must remain generic and extensible. HAU provides dedicated endpoints (e.g., `/api/diagnostics/ui-crash`) allowing the React frontend to report unhandled exceptions directly to the backend telemetry state. HAM aggregates data by connecting to HAU for provisioning, HMU for vLLM telemetry, CMU for global configuration, and OMU for Kafka/Patroni status.
+Not applicable for this module.
 
 ---
 
@@ -272,3 +322,9 @@ To ensure absolute accuracy in customer-facing release notes, HAU will split the
 
 ### 13.5. LLM-Driven Incremental Documentation Auto-Updates
 Leveraging the strict 13-point mandatory documentation structure, HAU will use a Semantic Section Replacement architecture. The LLM evaluates if an update is needed based on the generated changelog, completely rewrites *only* the affected specific section, and a Python parser dynamically splices it back into the Markdown file using regex header matching.
+
+### 13.6. Full Halo Component Monitoring & Telemetry Aggregation
+HAU implements a comprehensive monitoring architecture to provide visibility into all HALO components:
+1. **Halo Backend & Dashboard:** HAU actively polls the tenant's Halo Backend (`/api/diagnostics/health`) via localized REST queries to retrieve internal Redis/Kafka connection states and global React `ErrorBoundary` crashes.
+2. **Morpheus AI Pipelines:** HAU executes isolated PromQL queries against the cluster's Prometheus server using the tenant's namespace to extract native throughput (`morpheus_pipeline_events_processed_total`) and AI anomaly loss telemetry for the UI.
+3. **Infrastructure Abstraction:** Core shared infrastructure (Netbox, collectors, NetApp) is monitored via standard ServiceMonitors and aggregated by the ecosystem's native infrastructure monitoring utilities (HMU) to maintain HAU's strict focus on tenant-level application telemetry.

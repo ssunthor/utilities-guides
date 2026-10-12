@@ -1,166 +1,507 @@
-# Application Management Utility (AMU) - Design Document
+# Application Management Utility (AMU) - Architecture Document
 
-**Version:** 0.2.7
-**Date:** 2026-07-14
-**Author:** Martin Kecka & Gemini AI
-**Category:** (U) Utility / Administrative
+**Doc_Type:** Architecture
+**Category:** (U) Utility
+**Name:** Application Management Utility
 **Acronym:** AMU
+**Version:** 0.4.0
+**Date:** 2026-10-12
+**Author:** Martin Kecka & Gemini AI
+**Status:** Active
 
 ---
 
 ## 1. Introduction & Purpose 📜
 
-The **Application Management Utility (AMU)** is a headless, centralized gRPC microservice designed to handle **Application Portfolio Management (APM)** and **ITSM Integration** for the SERA AI ecosystem.
+The **Application Management Utility (AMU)** is a headless, centralized gRPC microservice and CLI orchestration engine designed to govern **Application Portfolio Management (APM)**, **GitOps Automation**, and **ITSM Integration** across the SERA/GIA AI ecosystem.
 
-While the Health Monitor Utility (HMU) strictly monitors physical infrastructure (GPUs, pods, hardware utilization), AMU monitors the **logical reality** of the applications. It acts as the central broker for application registries, distributed documentation, centralized user feedback, and logical dependency graphing.
+Operating as an autonomous, fully functional application on port `50102`, AMU provides engineers and operators with a rich Click CLI for ecosystem auditing, compliance verification, and GitOps rollouts. Concurrently, it serves as the primary portfolio and GitOps backend data broker for the **Sera Admin Module (SAM)** web interface. Within the ecosystem's administrative utility suite (AMU, CMU, DIU, HMU, OMU), while HMU monitors physical infrastructure and CMU provisions resources, AMU governs the **logical reality** and application lifecycle of the platform.
 
-AMU serves as the primary data aggregator for the Sera Admin Module (SAM) UI regarding application metadata and user interaction states.
-
----
-
-## 2. Core Architectural Principles 🏗️
-
-1. **Logical Abstraction:** AMU does not care about pods, nodes, or physical hardware. It cares about Application IDs, versions, user feedback tickets, and logical dependencies.
-2. **Standardized Ecosystem Contracts:** AMU enforces ecosystem compliance. To be managed by AMU, an application must implement a standardized set of gRPC endpoints via the `sera_standard.proto`.
-3. **Network Boundary & Topology Mapping:** AMU classifies application dependencies into four distinct architectural boundaries (`LOCAL`, `AI_FACTORY`, `CORPORATE`, `EXTERNAL`) and explicit topology groups (`infra`, `connector`, `internal`, `external`).
-4. **Database-Backed Registry:** AMU uses its own PostgreSQL database to maintain the global registry of applications and state logic, decoupled into robust Reader/Writer I/O patterns, with support for High Availability (HA) routing via `write_dsn` and `read_dsn`.
-5. **Continuous Discovery:** AMU employs a background daemon thread that continuously polls and refreshes metadata for actively registered endpoints to ensure logical reality matches the registry.
-6. **Shared File-System Access:** For MVP log inspection and documentation aggregation, AMU relies on direct read access to standardized shared volumes (e.g., `/ai/assets/logs/` and `/ai/assets/docs/`).
+AMU acts as the single source of truth for registered microservices, unmanaged external agents, dynamic dependency graphing, network boundary classification, port allocation planning, distributed documentation/changelog aggregation, and LLM-driven GitOps synchronization. It maintains its persistent state in HA PostgreSQL (`sam_admin_prod_db`) and coordinates directly with HashiCorp Vault, GitLab, and the AI Factory's vLLM inference cluster.
 
 ---
 
-## 3. Database Schema & State Management 🗄️
+## 2. Architecture & Ecosystem Integration 🏗️
 
-AMU maintains the global list of active microservices and logical dependencies within its own structured PostgreSQL schema. This strict separation ensures AMU is the sole source of truth for application portfolio state.
+AMU operates on a client-server architecture, exposing dual gRPC servicers on port `50102` (`amu-grpc.service`) backed by a multi-worker thread pool, while providing operators with a standalone Click CLI and background autonomous rediscovery daemons.
 
-### 3.1. Core Application Registry (`models.py`)
-* **Applications:** Tracks metadata such as `acronym`, `name`, `category`, and `version`.
-* **Dependencies:** Uses dynamic data from `GetDeepHealth()` to construct a Directed Acyclic Graph (DAG) in the database, tracking topological `dependency_group` context alongside network zones.
-* **Service Matrix:** Tracks dynamic multi-service arrays and `service_health_matrix` per application, rather than single hardcoded endpoints, verifying deep health reachability via active TCP socket pinging.
-* **External Agents:** Unmanaged ecosystem agents are tracked natively via isolated `ExternalAgent` infrastructure with `ecosystem` metadata support.
+### 2.1. Dual Servicer & Core Architectural Principles
+- **Dual Servicer Model:**
+  1. **`ApplicationManagementService` (`amu.proto`):** Domain servicer exposing 17 RPCs for global portfolio management, real-time aggregated health fan-out, GitOps orchestration (`SmartSync`, commits, rollbacks), port scanning, and external agent lifecycle management.
+  2. **`SeraAppService` (`sera_standard.proto`):** AMU is the **ecosystem custodian and reference implementation** of the universal SERA standard contract (`v1.2-universal`). In addition to self-reporting AMU's own metadata, deep health matrix, documentation, and changelog, AMU maintains the master codebase deployed to all other ecosystem modules via `deploy push-std`.
+- **Single Source of Logical Reality:** Authoritative registry for all registered applications, port reservations (`50051-50150` gRPC blocks and `7888+` frontend blocks), and dynamic inter-service dependency topologies.
+- **Autonomous Standalone Operation:** Functions as a complete standalone system with direct HA PostgreSQL access (`_read_engine` / `_write_engine`), background rediscovery threads, and independent CLI audit commands.
+- **SAM Backend Data Broker:** Feeds live portfolio lists, multi-app aggregated health trees, and real-time streaming GitOps sync updates directly to the **Sera Admin Module (SAM)** UI.
+- **HA Persistence Isolation:** Utilizes split read/write SQLAlchemy connection pools (`write_dsn` on `:5432` and `read_dsn` on `:5433`) with `pool_pre_ping=True` and connection-hold prevention during long-running Git/LLM operations.
+- **Dynamic Call Tracing:** Automatically propagates and logs `x-client-id` metadata headers (`[SAM]`, `[CLI]`, `[ORCH]`) across all inbound RPCs for complete provenance auditing.
 
----
+### 2.2. Ecosystem Integration & Data Flow
 
-## 4. Core Sub-Systems & Responsibilities ⚙️
+```mermaid
+graph TD
+    subgraph Clients ["Clients, Operators & Control Plane"]
+        SAM["Sera Admin Module (SAM UI)"]
+        CLI["AMU CLI (amu_cli.py)"]
+        ORCH["GIA Orchestrator"]
+    end
 
-### 4.1. Application Registry & Dependency DAG
-AMU maintains the global list of active microservices in PostgreSQL. 
-* It uses the data from `GetDeepHealth()` to build a **Directed Acyclic Graph (DAG)** of dependencies, dynamically classifying them into environment targets (`dev`, `prod`), network zones, and explicit dependency groups (`internal`, `external`).
-* It natively tracks dynamic multi-service arrays and `service_health_matrix` per application, rather than single hardcoded endpoints.
-* Tracks unmanaged ecosystem agents natively via the isolated `ExternalAgent` infrastructure and persists manual AI Agent properties via the `inventory_metadata` store.
-* The Port Manager exposes structured ecosystem port utilization to prevent overlap during onboarding.
+    subgraph AMU_Core ["Application Management Utility (AMU :50102)"]
+        GRPC["gRPC Server (50 Workers)"]
+        AMU_SVC["ApplicationManagementServiceImpl"]
+        SERA_SVC["SeraStandardServiceImpl (Reference v1.2)"]
+        REG_MGR["RegistryManager"]
+        SYNC_ORCH["SmartSyncOrchestrator"]
+        GIT_MGR["GitOpsManager"]
+        PORT_MGR["PortManager (ss / docker / proc)"]
+        BG_DAEMON["Background Rediscovery Daemon"]
+    end
 
-### 4.2. GitOps Orchestration Engine
-AMU features an integrated GitOps Engine allowing it to manage the physical files of registered applications:
-* Safely execute repository commits (`git sync`), rollbacks (`git rollback`), and history retrieval directly via gRPC.
-* Tracks `physical_path` and `is_managed` states in the registry, enabling centralized automation for local deployments.
-* Contains a dedicated `deploy push-std` CLI command to orchestrate the rollout of updates (like `sera_standard_service.py`) across all managed modules, complete with automated service restarts and deep-diff validation.
+    subgraph Persistence ["HA Persistence Layer"]
+        PG_WRITE[("PostgreSQL Primary (write_dsn :5432)")]
+        PG_READ[("PostgreSQL Replica (read_dsn :5433)")]
+    end
 
-### 4.3. Centralized Feedback Broker (SNC Connector)
-AMU acts as the middleman between user-facing applications (like Cash Application Assistant) and IT Service Management (ServiceNow).
-1. AMU aggregates feedback from registered apps.
-2. AMU normalizes this feedback and stores it in its PostgreSQL database.
-3. AMU utilizes the **SNCConnector** (`core/connectors/snc_connector.py`) to fire direct gRPC payloads to the ServiceNow Connector, generating official Incidents or Service Requests dynamically.
+    subgraph External_Infra ["AI Factory & Corporate Infrastructure"]
+        VAULT["HashiCorp Vault (vault-aif.gt-t.net)"]
+        VLLM["vLLM (google/gemma-4-31B-it)"]
+        GITLAB["GitLab Remote (gitlab.gt-t.net)"]
+        SNC["ServiceNow Connector (SNC)"]
+    end
 
-### 4.4. Log Inspection Engine
-AMU provides administrators with a direct view into application logs without requiring `kubectl` access.
-* **Current State:** AMU directly parses log files written to the standardized shared volume: `/ai/assets/logs/{app_acronym}/`.
-* **Future State:** AMU will transition to querying a centralized logging database (VictoriaLogs) using `trace_id` for distributed log correlation.
+    subgraph Managed_Ecosystem ["Registered SERA Microservices (50051-50150)"]
+        APP_1["SERA App A (SeraAppService)"]
+        APP_2["SERA App B (SeraAppService)"]
+        APP_N["SERA App N (SeraAppService)"]
+    end
 
-### 4.5. Documentation Aggregator
-AMU replaces localized script-based documentation fetchers. It proxy-calls the `GetChangelog` and `GetDocs` endpoints of registered apps, parses the raw strings into structured JSON payloads, and serves them directly to the SAM WebUI.
+    SAM -->|gRPC + x-client-id| GRPC
+    CLI -->|gRPC / Direct DB| GRPC
+    ORCH -->|gRPC + x-client-id| GRPC
 
-### 4.6. Background Rediscovery Daemon
-AMU maintains a background daemon thread (`grpc_api/services.py`) that continuously polls and refreshes metadata for actively registered endpoints. This auto-rediscovery behavior is controlled natively by the `discovery` block in `settings.yaml`, eliminating the need for manual CLI registry syncs or external systemd timers.
+    GRPC --> AMU_SVC
+    GRPC --> SERA_SVC
 
----
+    AMU_SVC --> REG_MGR
+    AMU_SVC --> SYNC_ORCH
+    AMU_SVC --> GIT_MGR
+    AMU_SVC --> PORT_MGR
+    BG_DAEMON --> REG_MGR
 
-## 5. Module Structure 📂
+    AMU_SVC -->|SQLReader| PG_READ
+    AMU_SVC -->|SQLWriter| PG_WRITE
+    REG_MGR -->|SQLWriter| PG_WRITE
 
-The AMU codebase is separated into logical boundaries to ensure clean domain responsibilities:
+    REG_MGR -->|GetAppInfo / GetDeepHealth| APP_1
+    REG_MGR -->|GetAppInfo / GetDeepHealth| APP_2
+    AMU_SVC -->|Concurrent Health & Docs Poll| APP_N
 
-* `cli/`: Command-line interfaces for manual registration, info, and deployments (`amu_cli.py` and commands).
-* `config/`: Centralized settings (`settings.yaml`).
-* `core/`: The core business logic including GitOps (`git_manager.py`), dependency resolution (`registry_manager.py`), ports (`port_manager.py`), and IO (`io_handlers/`).
-* `database/`: Database models and connection logic.
-* `grpc_api/`: The `amu_service.py` entrypoint and standard ecosystem protobuf definitions.
-* `scripts/`: Dumping ground for one-time migrations and testing scripts.
-
----
-
-## 6. Developer Guide: How to Register a New App 🛠️
-
-For AMU to successfully track, monitor, and route tickets for your application, it must comply with the ecosystem standards.
-
-> [!TIP]
-> **LLM Automation:** When asking an AI Agent to onboard a new application, point it directly to the implementation guide: `docs/amu_llm_guide.md`.
-
-### 6.1. Implement the Universal SERA Standard Protobuf
-Your application's gRPC server MUST expose the `SeraAppService` defined in `/ai/assets/protos/sera_standard/sera_standard.proto`. This is now a **`v1-universal`** contract enforced across the ecosystem.
-
-Developers have two options to implement this contract:
-1. **Option A: The Universal Service (Recommended):** Standardize your `settings.yaml` structure and seamlessly inject the pre-built `sera_standard_service.py` handler. This natively resolves `GetAppInfo`, `GetDeepHealth`, and dynamic dependency topology without custom code. Refer to the configuration guide: `docs/conf_concept.md`.
-2. **Option B: Custom Implementation:** Build a custom gRPC service that manually satisfies the expected structure of the following RPC methods:
-   * **`GetAppInfo()`**: Returns static metadata (Acronym, Name, Category, Version) and a flat list of downstream dependencies.
-   * **`GetDeepHealth()`**: Evaluates the app's ability to reach its dependencies (e.g., Databases, APIs). The AMU heuristic engine parses the `connection_metadata` (like `host` or `instance_url`) to map the dependency into the correct network boundary (`LOCAL`, `AI_FACTORY`, `CORPORATE`, `EXTERNAL`).
-   * **`GetChangelog()`**: Returns raw YAML from your `docs/CHANGELOG.yaml`.
-   * **`GetDocs()`**: Returns raw Markdown from your design documentation.
-   * **`GetFeedback()`**: (If applicable) Exposes UI feedback loops.
-
-### 6.2. Minimum Verification Rules
-When a new application is registered with AMU, AMU will perform a strict validation check before adding it to the database:
-1. **Metadata Existence:** Verifies the presence of a properly formatted `settings.yaml` with a `module_info` block.
-2. **Documentation Structure:** Verifies the existence of a `docs/` folder, a `CHANGELOG.yaml`, and a main design document.
-3. **API Compliance:** Attempts to ping the application's `/info` and `/health` endpoints to ensure the gRPC contract is respected.
-
-*(Note: Verification rules will evolve and become stricter as the ecosystem matures.)*
-
-### 6.3. Ensure Proper Configuration
-AMU relies on your `settings.yaml` to extract the port if you are using path-based registration. Your configuration must group API and gRPC endpoints under `system_services`. Ensure your config has:
-
-```yaml
-system_services:
-  grpc:
-    port: 50xxx
-  api:
-    port: 78xxx
+    SYNC_ORCH -->|API Key Retrieval| VAULT
+    SYNC_ORCH -->|Diff Evaluation & Map-Reduce| VLLM
+    SYNC_ORCH --> GIT_MGR
+    GIT_MGR -->|Git Push / Reset| GITLAB
 ```
 
-Also, ensure dependencies are explicitly structured in an `external_services` YAML block with `type` and `dependency_name`.
+---
 
-### 6.4. Register via the CLI
-Use the AMU CLI to onboard the application. You can do this by exact endpoint, by directory path, or via an automated port sweep.
+## 3. Module File Map 📂
 
-[bash]
-# Option A: Register by explicit Endpoint
-python3 application_management_utility.py registry register --endpoint "localhost:50091"
-
-# Option B: Register by Directory Path
-python3 application_management_utility.py registry register --path /ai/snow_connector
-
-# Option C: Auto-Discover (Sweeps standard port ranges)
-python3 application_management_utility.py registry register --auto
-[/bash]
-
-### 6.5. Verify Your Registration
-Once registered, verify that AMU successfully parsed your app and mapped its dependencies correctly:
-
-[bash]
-# Check the registry
-python3 application_management_utility.py registry list
-
-# Verify the network boundary mappings
-python3 application_management_utility.py registry deps
-[/bash]
+```plaintext
+/ai/utilities/application_management_utility
+├── application_management_utility.py     # Main executable entrypoint; loads YAML config, sets up logging, launches Click CLI
+├── bootstrap_helper.py                   # Virtual environment bootstrapper and dependency verifier
+├── requirements.txt                      # Python package dependencies (grpcio, protobuf, sqlalchemy, psycopg2-binary, redis, click, pyyaml, hvac)
+├── README.md                             # High-level repository overview and links to master SERA Guides
+├── config/
+│   ├── __init__.py                       # Config package marker
+│   └── settings.yaml                     # Primary configuration (ports, database DSNs, external services, Vault paths, LLM engines)
+├── cli/
+│   ├── __init__.py                       # CLI package marker
+│   ├── amu_cli.py                        # Root Click group (NestedHelpGroup), server launcher, and DB initialization commands
+│   ├── utils.py                          # gRPC channel builders, MetadataClientInterceptor, JSON printer, and @handle_grpc_errors
+│   └── commands/
+│       ├── __init__.py                   # CLI commands package marker
+│       ├── audit_cmds.py                 # `audit llms` (flags non-prod endpoints and legacy models) and `audit infra` (audits dev vs prod infra)
+│       ├── deploy_cmds.py                # `deploy push-std` (rolls out sera_standard_service.py to apps, restarts services, re-registers)
+│       ├── git_cmds.py                   # `git status`, `git commit`, `git history`, `git rollback`, `git sync` (LLM SmartSync), and `git sync-docs`
+│       ├── health_cmds.py                # `health get-all` and `health get <acronym>` for aggregated deep health inspection
+│       ├── info_cmds.py                  # `info ports`, `info list-apps`, `info get-changelog`, `info get-docs`, `info deployments`, `info export-settings`, `info codebase`
+│       ├── module_cmds.py                # `module info` and `module check-health` querying AMU's own SeraAppService
+│       ├── registry_cmds.py              # `registry register`, `registry list`, `registry deps`, and `registry delete`
+│       └── releases_cmds.py              # `releases summary` aggregating versions and changelog categories across active apps
+├── core/
+│   ├── __init__.py                       # Core package marker
+│   ├── git_manager.py                    # GitOpsManager: Git execution, diff extraction, CHANGELOG prepending, commits, and rollbacks with permission healing
+│   ├── llm_interface.py                  # vLLMClient: HTTP inference client with Vault API key injection and thinking mode support
+│   ├── port_manager.py                   # PortManager: Inspects OS sockets (ss), Docker containers, and /proc to map ports and calculate free blocks
+│   ├── registry_manager.py               # RegistryManager: Endpoint discovery, path inference, boundary/env classification, and DB persistence
+│   ├── smart_sync_orchestrator.py        # SmartSyncOrchestrator: Streaming GitOps workflow—diff chunking, Map-Reduce, LLM classification, YAML correction, version bumping
+│   ├── clients/
+│   │   ├── __init__.py                   # Clients package marker
+│   │   └── vault_client.py               # VaultClient: AppRole authentication engine with Vault KV v2 secret retrieval
+│   ├── connectors/
+│   │   ├── __init__.py                   # Connectors package marker
+│   │   └── snc_connector.py              # SNCConnector: gRPC client wrapper for ServiceNow Connector (CreateIncident)
+│   ├── database/
+│   │   ├── __init__.py                   # Database package marker
+│   │   ├── database.py                   # SQLAlchemy engine initialization, QueuePool pooling, and get_db_session context manager
+│   │   └── models.py                     # Declarative ORM models: Application, AppService, AppDependency, FeedbackTicket, ExternalAgent
+│   └── io_handlers/
+│       ├── __init__.py                   # IO handlers package marker
+│       ├── sql_reader.py                 # Read-only queries (get_all_applications, get_active_applications, get_valid_managed_app, etc.)
+│       └── sql_writer.py                 # Mutation abstractions (upsert_application, update_app_version, clear_app_dependencies, etc.)
+├── grpc_api/
+│   ├── __init__.py                       # gRPC API package marker
+│   ├── amu_service.py                    # ApplicationManagementServiceImpl: Implements all 17 portfolio & GitOps RPCs
+│   ├── generate_stubs.py                 # Compiles amu.proto and sera_standard.proto into generated stubs directory
+│   ├── sera_standard_service.py          # Reference v1.2-universal implementation of SeraAppService, deployed to ecosystem via deploy push-std
+│   ├── services.py                       # Bootstraps gRPC server thread pool, binds servicers, reflection, and background rediscovery daemon
+│   └── protos/
+│       ├── amu.proto                     # Protobuf contract for amu.v1.ApplicationManagementService
+│       └── sera_standard.proto           # Master ecosystem Protobuf contract for sera.standard.v1.SeraAppService
+├── prompts/
+│   ├── __init__.py                       # LLM system prompts package marker
+│   ├── commit_message_prompt.py          # Generates concise noun-phrase commit summaries from YAML changelog entries
+│   ├── extract_features_prompt.py        # Map-phase prompt extracting architectural bullet points from code diff chunks
+│   ├── merge_changelog_prompt.py         # Reduce-phase prompt consolidating extracted features into standard YAML categories
+│   └── smart_sync_prompt.py              # Evaluates diffs against changelogs to classify MAJOR vs MINOR changes
+├── utils/
+│   ├── __init__.py                       # Shared utils package marker
+│   └── logging_setup.py                  # MultiProcessSafeDailyLogger with 14-day rotation (amu.log, amu_err.log) and console routing
+└── docs/
+    ├── CHANGELOG.yaml                    # Local machine-readable release history for AMU
+    ├── amu_design.md                     # Symlink -> /ai/assets/guides/utilities_guides/amu_design.md
+    ├── amu_llm_guide.md                  # Symlink -> /ai/assets/guides/llm_guides/amu_llm_guide.md
+    └── conf_concept.md                   # Symlink -> /ai/assets/guides/ecosystem/conf_concept.md
+```
 
 ---
 
-## 7. Roadmap & Future Enhancements 🚀
+## 4. Core Processing Lifecycle ⚙️
 
-* **API Payload Refactoring (AppInfo vs DeepHealth):** Once all ecosystem applications have adopted the `sera_standard_service.py`, refactor `sera_standard.proto` to strictly separate static vs. dynamic dependency data. Currently, `GetDeepHealth` builds heavy static metadata (like `connection_metadata`, `dependency_group`, and `dependency_type`) alongside dynamic health status. This static topology data logically belongs in `GetAppInfo` to reduce the payload overhead of constant health polling. The AMU Registry and SAM UI (`AmuTopologyWidget.jsx`) are already architected to gracefully merge static AMU registry data with lightweight dynamic health statuses.
-* **Gateway Integration:** In future iterations of the Sera AI Gateway architecture, AMU will act as the control plane to dynamically "deploy" or "deregister" applications in the Gateway's proxy configuration.
-* **Standardization & Compliance Matrix:** Build an automated scoring system within the dashboard that grades registered applications on ecosystem compliance (e.g., verifying `CHANGELOG.yaml`, `docs/`, `system_services`, and LLM configs are properly populated).
-* **Remote Action Execution:** Expand the `sera_standard.proto` to allow AMU to trigger lifecycle events on remote microservices (e.g., `RESTART_SERVICES`, `REBUILD_UI`). *Note: While currently this would target `systemctl` or `npm`, the abstraction ensures seamless transition when services migrate to Kubernetes/GitLab orchestration in the future.*
-* **VictoriaLogs Integration:** Transition the Log Inspection Engine from parsing flat files in `/ai/assets/logs/` to querying VictoriaLogs via PromQL/MetricsQL.
-* **Automated Changelog Blasts:** Allow AMU to automatically parse new `CHANGELOG.yaml` entries upon application registration and broadcast release notes to users via email or UI notifications.
-* **Deep Feedback Analytics:** Pass raw user feedback strings through local LLMs to automatically categorize issues as "Bugs" vs "Feature Requests" before handing them off to the SNC Connector.
+### 4.1. Server Boot & Initialization Sequence (`start-grpc-server`)
+1. **Configuration & Logging:** `application_management_utility.py` loads `config/settings.yaml` and initializes `setup_logging()`. Because `start-grpc-server` is present in `sys.argv`, console logging is set to `INFO` (otherwise `WARNING` for CLI commands to keep stdout clean).
+2. **Proto Synchronization & Stub Compilation (`check_and_generate_stubs`):**
+   * Compares local `grpc_api/protos/sera_standard.proto` against `/ai/assets/protos/sera_standard/sera_standard.proto` using `filecmp.cmp(shallow=False)` and copies it if newer or missing.
+   * Checks modification timestamps (`os.path.getmtime`) of `amu.proto` and `sera_standard.proto` against generated `*_pb2.py` files in `/ai/assets/protos/application_management_utility/generated`.
+   * If regeneration occurs, `amu_cli.py` executes `os.execv(sys.executable, [sys.executable, "-u"] + sys.argv)` to replace the current process and cleanly load the newly compiled protobuf modules into `sys.path`.
+3. **Database Initialization:** Calls `initialize_database(config)`, instantiating separate SQLAlchemy `create_engine` pools (`pool_size=10`, `max_overflow=20`, `pool_pre_ping=True`) for `write_dsn` and `read_dsn`, followed by `init_db()` (`Base.metadata.create_all(bind=_write_engine)`).
+4. **gRPC Server Binding (`grpc_api/services.py`):**
+   * Initializes `grpc.server` with `ThreadPoolExecutor(max_workers=50)`.
+   * Attaches `ApplicationManagementServiceImpl`, `SeraStandardServiceImpl`, `HealthServicer`, and enables `reflection.enable_server_reflection`.
+   * Binds to `0.0.0.0:50102` and starts listening.
+5. **Background Rediscovery Daemon:** Spawns a daemon thread (`background_discovery`) that sleeps for `initial_delay_seconds` (`300`s) and subsequently triggers `RegistryManager.rediscover_existing()` every `interval_seconds` (`86400`s).
+
+### 4.2. Application Registration Lifecycle (`RegistryManager.register_endpoint`)
+1. **Handshake Probe:** Opens an insecure gRPC channel to `<endpoint>` with metadata `('x-client-id', 'AMU')`:
+   * Calls `GetAppInfo(Empty(), timeout=0.5)`.
+   * Calls `GetDeepHealth(Empty(), timeout=5.0)` (fails open to `None` if `RpcError` occurs).
+2. **Physical Path Inference:** If `physical_path` is not explicitly provided and `target_host` is local (`localhost`, `127.0.0.1`, `0.0.0.0`, `[::]`), `RegistryManager` invokes `PortManager.get_port_planner_data()`, matches the listening port's `/proc/<pid>/cmdline` against regex `(/ai/[a-zA-Z0-9_-]+(?:/[a-zA-Z0-9_-]+)?)`, strips trailing `/venv` or `/bin`, and assigns the resolved directory path.
+3. **Database Upsert:** Opens a write session (`get_db_session(read_only=False)`), upserts the `Application` record, and purges existing child `AppDependency` and `AppService` rows (`clear_app_dependencies`, `clear_app_services`).
+4. **Topology & Boundary Classification:** Iterates over `deep_health.dependency_health_matrix`, applies network boundary and environment regex heuristics (detailed in Section 5.1), and inserts new `AppDependency` and `AppService` rows before committing the transaction.
+
+### 4.3. Real-Time Aggregated Health Fan-Out (`GetAggregatedHealth`)
+1. Queries active applications from the database via `SQLReader`.
+2. Spawns a `concurrent.futures.ThreadPoolExecutor(max_workers=20)` to query `GetDeepHealth(Empty(), timeout=5.0)` across all target applications in parallel.
+3. **Dynamic Version Self-Healing:** If a target application's `health_resp.app_version` differs from the version stored in AMU's PostgreSQL registry (and is not `"unknown"`), AMU automatically invokes `SQLWriter.update_app_version(node.acronym, version_to_update)` within the active session.
+4. Aggregates all `AppHealthNode` objects and returns the unified `AggregatedHealthResponse`.
+
+---
+
+## 5. Detailed Business Logic, Rules & HITL 🧠
+
+AMU is a headless backend utility and CLI tool; interactive **Human-in-the-Loop (HITL) UI workflows are not applicable for this module** (operator interactions occur strictly via deterministic CLI flags such as `--dry-run`, `--minor-only`, or interactive commit selection during `git rollback`).
+
+### 5.1. Dependency Boundary & Environment Heuristic Engine (`RegistryManager`)
+When registering an application, AMU inspects the `connection_metadata` map returned by `GetDeepHealth()` (extracting `host`, `hosts`, `write_host`, `read_host`, `target`, `instance_url`, `url`, `base_url`, `api_url`, `token_url`) and applies the following ordered decision rules:
+
+1. **Network Boundary & Base Environment Assignment:**
+   * **`LOCAL` (`env = "dev"`):** Triggered if `"localhost"` or `"127.0.0.1"` appears in the extracted host or URL.
+   * **`AI_FACTORY` (`env = "prod"`):** Triggered if `"-aif-"`, `"slo-aif"`, `"aif-llm"`, or `"aif.gt-t.net"` appears in the host or URL.
+   * **`CORPORATE` (`env = "prod"`):** Triggered if `"gt-t.net"`, `"gtt.net"`, `"mypop2pop.com"`, or a `10.*` prefix appears in the host or URL.
+   * **Internal Fallback:** If `dependency_type == "internal"`, sets `boundary = "CORPORATE"` if `"bank_profile"` is in `dependency_name`, otherwise `"LOCAL"`.
+   * **`EXTERNAL` (`env = "unknown"`):** Default fallback if none of the above rules match.
+2. **Granular Environment Override (Regex Word-Boundary Matching):**
+   AMU concatenates `f"{dep.dependency_name} {host} {url}".lower().replace('_', ' ')` and evaluates regex word boundaries in strict priority order:
+   * `\bpreprod\b` $\rightarrow$ `env = "preprod"`
+   * `\bstg\b|\bstaging\b` $\rightarrow$ `env = "stg"`
+   * `\bdev\b|\btest\b|\bqa\b` $\rightarrow$ `env = "dev"`
+   * `\bprod\b` $\rightarrow$ `env = "prod"`
+
+### 5.2. Universal Deep Health Evaluation Logic (`sera_standard_service.py` `v1.2-universal`)
+AMU maintains the master reference implementation of `SeraStandardServiceImpl`, which can be pushed to any ecosystem module via `deploy push-std`. Its health state machine operates as follows:
+
+1. **Active TCP Socket Probing (`check_tcp_ping`):**
+   * Parses host and port from DSNs/URLs (defaulting to port `443` for `https`, `80` for `http`, and `636` for `ldap`).
+   * Executes `socket.create_connection((host, int(port)), timeout=1.0)`. Returns `"OK"` (`"Connected"`) or `"DOWN"` (`"Connection Timeout"` / `"Connection Failed"`).
+2. **DSN Sanitization (`sanitize_dsn`):**
+   * Parses single, semicolon-delimited (`;`), or comma-delimited (`,`) connection strings via `urllib.parse.urlparse`, stripping passwords while preserving `<scheme>://<username>@<hostname>:<port>/<path>`.
+3. **Valkey / Redis Owner Introspection:**
+   * For cache dependencies (`redis`, `valkey`, `redis_cache`), replaces `valkey://` or `sentinel://` with `redis://` (and port `:26379` with `:6379`), connects with `socket_timeout=0.2`, and queries keys `__GIA_DB_OWNER__` or `__SERA_DB_OWNER__` to populate `connection_metadata["description"]`.
+4. **Systemd Service Verification:**
+   * Executes `subprocess.run(['systemctl', 'is-active', service_name], timeout=2)` for every entry in `system_services`. Sets status to `"running"` if stdout is `"active"`, otherwise `"stopped"`.
+5. **Overall Status Escalation Matrix (`HEALTHY` $\rightarrow$ `DEGRADED` $\rightarrow$ `DOWN`):**
+   * Starts at `overall_status = "HEALTHY"`.
+   * Any service with `status != "running"` or any dependency with `status != "OK"` downgrades status to `"DEGRADED"`.
+   * **Global Postgres Failure Rule:** If any dependency with `dependency_type == "postgresql"` has `status == "DOWN"`, `overall_status` is forced to `"DOWN"`.
+   * **Connector Environment-Aware Escalation Rule:** If the application's `module_info.category == "connector"`:
+     * **Sole Dependency Failure:** If the connector has only `1` dependency in `["external", "connector"]` and its status is `"DOWN"`, `overall_status` is forced to `"DOWN"`.
+     * **Production Target Failure:** If the connector has multiple dependencies and a `"DOWN"` dependency is classified as production (explicit `env` metadata in `['prod', 'production']`, `'prod'` in `dependency_name` excluding `'preprod'`/`'nonprod'`, or no environment keywords like `test`, `dev`, `qa`, `uat`, `sandbox`, `stg` in the name), `overall_status` is forced to `"DOWN"`.
+   * **AMU Aggregator Override (`GetAggregatedHealth`):** When AMU polls an app, if any service in `service_health_matrix` is not `"running"`, AMU marks the node `"DOWN"`. If the gRPC call itself raises `grpc.RpcError`, AMU marks the app `"DOWN"` if `num_services <= 1`, or `"DEGRADED"` if `num_services > 1`.
+
+### 5.3. Port Allocation & Process Inspection Rules (`PortManager`)
+* **Frontend Planner Range:** Scans ports `7888` to `7987` (`frontend_start=7888`, `frontend_range=100`), plus hardcoded out-of-range frontend ports `{5001, 8501, 8502}`. Identifies the lowest unassigned port in `7888..7987` as `next_available_port`.
+* **gRPC Block Planner:** Partitions ports `50051` to `50150` into `10` contiguous blocks of `10` ports each (`50051-50060`, `50061-50070`, ..., `50141-50150`). Flags a block as `is_totally_free = True` only if all 10 ports in the block have zero active listeners.
+* **Process Attribution:** Cross-references `ss -ltnp` PIDs against `/proc/<pid>/cgroup` (`Docker` if `docker`/`moby`, `Systemd` if `system.slice`, `User` if `user.slice`) and `/proc/<pid>/cmdline` (extracting `/ai/<folder1>/<folder2>` names) alongside `docker ps` port mappings.
+
+### 5.4. Audit Compliance Rules (`audit_cmds.py`)
+* **LLM Audit (`audit llms`):** Flags any registered `LlmModel` where `"aif.gt-t.net"` is not in `base_url` as `⚠️ NON-PRODUCTION ENDPOINT`, and flags any model containing `"gemma-3"` or `"gemma3"` as `⚠️ SHOULD BE REPLACED WITH gemma4-31b`.
+* **Infrastructure Audit (`audit infra`):** Categorizes applications based on `infra` group dependencies into `✅ PRODUCTION READY` (only `prod` deps) vs `❌ MIXED INFRA` / `❌ HAS DEV INFRA`, grouping offending applications by their target `dev` database name to streamline migration planning.
+
+---
+
+## 6. AI, LLM & Machine Learning Execution 🤖
+
+AMU integrates with the AI Factory's **vLLM** inference cluster via `core/llm_interface.py` and `core/smart_sync_orchestrator.py` to power automated GitOps (`SmartSyncAppChanges`).
+
+### 6.1. Model & Client Configuration
+* **Target Model:** `google/gemma-4-31B-it` hosted on `https://aif-llm-gemma4-31b.aif.gt-t.net/v1/chat/completions`.
+* **Generation Parameters:** `temperature=0.2`, `max_tokens=32768`, `enable_thinking="enable"` (passed via `chat_template_kwargs: {"enable_thinking": True}`).
+* **Authentication:** `vLLMClient` dynamically retrieves static global API keys (`haproxy/global/apps/amu-prod`) directly from HashiCorp Vault via `VaultClient` (AppRole authentication) and caches the token across invocations, injecting it as an HTTP Bearer header (`Authorization: Bearer <api_key>`).
+
+### 6.2. SmartSync Evaluation & Map-Reduce Pipeline
+1. **Smart Diff Extraction (`GitOpsManager.get_full_uncommitted_diff`):**
+   * Ignores `CHANGELOG.yaml` modifications.
+   * Replaces lockfile diffs (`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`), cache files (`/cache/`, `__pycache__`), and deleted files (`status.startswith('D')`) with compact metadata placeholders.
+   * Truncates individual file diffs exceeding `20,000` characters.
+   * Truncates `current_changelog` context to the top `3` version entries (or `15,000` characters max).
+2. **Token Estimation & Map-Reduce Threshold:**
+   * Estimates payload tokens via integer division: `token_estimate = (len(diff) + len(current_changelog)) // 4`.
+   * **Direct Path ($\le 20,000$ tokens):** Sends the raw diff and current changelog directly to `SMART_SYNC_PROMPT` (`json_mode=True`).
+   * **Map-Reduce Path ($> 20,000$ tokens):**
+     1. **Chunking:** Splits the diff into chunks of `500` lines (`chunk_text`).
+     2. **Map Phase (`_extract_features`):** Invokes `EXTRACT_FEATURES_PROMPT` (`json_mode=False`, `temperature=0.2`) on each chunk to extract architectural bullet points.
+     3. **Reduce Phase (`_merge_features`):** Combines all extracted bullet points and invokes `MERGE_CHANGELOG_PROMPT` (`json_mode=True`) to deduplicate and categorize items into single-quoted YAML.
+     4. **Final Classification:** Feeds the `"MERGED FEATURES FROM LARGE DIFF"` into `SMART_SYNC_PROMPT`.
+3. **YAML Sanitization & Version Bumping:**
+   * If `is_major == True`, validates `new_changelog_yaml` with `yaml.safe_load`. If malformed, applies regex auto-correction (`^[ \t]*- category:` $\rightarrow$ `- category:` and `^[ \t]*items:` $\rightarrow$ `  items:`) and re-parses.
+   * Normalizes the YAML list and invokes `COMMIT_MESSAGE_PROMPT` (`_generate_commit_message`) to generate a ~60-character noun-phrase commit summary.
+   * **Custom Version Bump Formula:** Splits `X.Y.Z` into `minor = int(parts[1])` and `patch = int(parts[2])`. If `patch >= 9`, increments `minor += 1` and resets `patch = 0` (e.g., `0.3.9` $\rightarrow$ `0.4.0`); otherwise increments `patch += 1`.
+   * Prepends the new release block to `docs/CHANGELOG.yaml` using the max `mtime` of uncommitted files as the release date, syncs `config/settings.yaml` via regex `^( {2}version:\s*")([^"]+)(")`, and pushes to GitLab.
+
+---
+
+## 7. Data Models, State, Storage & Auditing 🗄️
+
+AMU persists its state in an HA PostgreSQL database (`sam_admin_prod_db`), utilizing split read/write SQLAlchemy session factories (`_WriteSessionFactory` on `:5432` and `_ReadSessionFactory` on `:5433`).
+
+### 7.1. PostgreSQL Schema (`core/database/models.py`)
+
+| Table Name | ORM Class | Primary Key | Key Columns & Types | Relationships & Cascade Rules |
+| :--- | :--- | :--- | :--- | :--- |
+| `applications` | `Application` | `id` (`Integer`, Auto) | `acronym` (`String(50)`, Unique), `name` (`String(255)`), `version` (`String(50)`), `category` (`String(100)`), `description` (`String(500)`), `registered_at` (`DateTime`), `last_verified_at` (`DateTime`), `is_active` (`Boolean`), `llm_models` (`JSON`), `custom_metadata` (`JSON`), `inventory_metadata` (`JSON`), `physical_path` (`String(255)`), `is_managed` (`Boolean`), `is_external` (`Boolean`) | `dependencies`, `services`, `feedback_tickets` (`cascade="all, delete-orphan"`) |
+| `app_services` | `AppService` | `id` (`Integer`, Auto) | `parent_app_id` (`FK -> applications.id`), `service_name` (`String(100)`), `endpoint` (`String(255)`), `service_type` (`String(50)`), `status` (`String(50)`) | `parent_app` (`Application`) |
+| `app_dependencies` | `AppDependency` | `id` (`Integer`, Auto) | `parent_app_id` (`FK -> applications.id`), `child_dependency_name` (`String(100)`), `dependency_type` (`String(50)`), `dependency_group` (`String(50)`), `environment` (`String(50)`), `network_boundary` (`String(50)`), `connection_data` (`JSON`) | `parent_app` (`Application`) |
+| `feedback_tickets` | `FeedbackTicket` | `id` (`Integer`, Auto) | `app_id` (`FK -> applications.id`), `user_id` (`String(100)`), `timestamp` (`DateTime`), `raw_content` (`JSON`), `ai_analysis_summary` (`String`), `snow_ticket_number` (`String(100)`), `status` (`String(50)`, default `"new"`) | `app` (`Application`) |
+| `external_agents` | `ExternalAgent` | `id` (`Integer`, Auto) | `acronym` (`String(50)`, Unique), `name` (`String(255)`), `category` (`String(100)`), `version` (`String(50)`), `description` (`String(500)`), `consumers` (`JSON`), `inventory_metadata` (`JSON`) | Standalone table for unmanaged external agents. |
+
+### 7.2. Session Lifecycle & Concurrency Controls
+* **Read/Write Isolation:** Read-only gRPC queries (`ListRegisteredApps`, `GetAppChangelog`, `GetAppDocs`, `GetAppGitStatus`, `GetExternalAgents`) use `get_db_session(read_only=True)` routed to the read replica without transaction commits.
+* **Connection Hold Prevention:** During slow blocking operations (`SmartSyncAppChanges`, `CommitAppChanges`, `RollbackAppChanges`), AMU opens a short-lived `read_only=True` session to validate the application via `SQLReader.get_valid_managed_app()`, extracts `physical_path`, and **closes the database session** before invoking Git commands or LLM API requests.
+
+---
+
+## 8. APIs, Observability & Communication Contracts 📡
+
+AMU exposes two gRPC services on `0.0.0.0:50102` alongside standard gRPC Health Checking (`grpc.health.v1.Health`) and Server Reflection (`grpc.reflection.v1alpha.ServerReflection`). All inbound gRPC calls are logged with the caller's identity extracted from the `x-client-id` invocation metadata header (`extract_client_id`).
+
+### 8.1. `amu.v1.ApplicationManagementService` (`amu.proto`)
+
+| RPC Method | Request Message | Response Message | Operational Description |
+| :--- | :--- | :--- | :--- |
+| `ListRegisteredApps` | `google.protobuf.Empty` | `AppListResponse` | Returns all registered `Application` records with nested `AmuDependency`, `LlmModel`, `AmuServiceInfo`, `custom_metadata`, and `inventory_metadata`. |
+| `GetAggregatedHealth` | `HealthRequest` (`target_acronym`) | `AggregatedHealthResponse` | Concurrently polls `GetDeepHealth` across active apps (or a single app), self-heals version drift, and returns live dependency/service health matrices. |
+| `GetAppChangelog` | `AppRequest` (`target_acronym`, `limit`) | `AppChangelogResponse` | Proxy-calls `GetChangelog` on the target app's gRPC endpoint, parses raw YAML into structured `ChangelogEntry` objects, and applies optional entry `limit`. |
+| `GetAppDocs` | `AppRequest` (`target_acronym`) | `AppDocsResponse` | Proxy-calls `GetDocs` on the target app's gRPC endpoint and returns `raw_markdown`. |
+| `GetPortStatus` | `google.protobuf.Empty` | `PortStatusResponse` | Invokes `PortManager.get_port_planner_data()` to return `frontend_planner`, `grpc_blocks`, `docker_ports`, and `other_ports`. |
+| `RediscoverApps` | `google.protobuf.Empty` | `RediscoverResponse` | Triggers `RegistryManager.rediscover_existing()` to re-poll all active registered endpoints and returns `refreshed_endpoints`. |
+| `GetAppGitStatus` | `AppRequest` (`target_acronym`) | `GitStatusResponse` | Returns latest commit message, `has_uncommitted_changes`, `--stat` summary, and `last_modified_uncommitted_timestamp` for a managed app. |
+| `CommitAppChanges` | `GitCommitRequest` | `GitCommitResponse` | Syncs `settings.yaml` version from `CHANGELOG.yaml`, commits all changes with optional author override, and pushes to GitLab. |
+| `SmartSyncAppChanges` | `SmartSyncRequest` | `stream SmartSyncResponse` | Server-streaming RPC yielding real-time `is_progress` updates during LLM evaluation and a final result with `classification` (`MAJOR`/`MINOR`/`NONE`) and `new_version`. |
+| `GetAppGitHistory` | `GitHistoryRequest` (`target_acronym`, `limit`) | `GitHistoryResponse` | Returns recent commit hashes, messages, authors, and dates (`git log -n<limit>`). |
+| `RollbackAppChanges` | `GitRollbackRequest` | `GitRollbackResponse` | Executes a non-destructive forward rollback (`git reset --hard <hash>` $\rightarrow$ `git reset --soft HEAD` $\rightarrow$ `git commit` $\rightarrow$ `git push`) and restores `g+w` permissions. |
+| `SetAppManaged` | `SetAppManagedRequest` | `google.protobuf.Empty` | Toggles `Application.is_managed` boolean in PostgreSQL. |
+| `UpdateInventoryMetadata` | `UpdateInventoryMetadataRequest` | `google.protobuf.Empty` | Replaces `Application.inventory_metadata` JSON dictionary for a target app. |
+| `AddExternalAgent` | `AddExternalAgentRequest` | `google.protobuf.Empty` | Upserts an unmanaged `ExternalAgent` record. |
+| `UpdateExternalAgent` | `UpdateExternalAgentRequest` | `google.protobuf.Empty` | Updates an existing `ExternalAgent` record. |
+| `DeleteExternalAgent` | `DeleteExternalAgentRequest` | `google.protobuf.Empty` | Deletes an `ExternalAgent` record by acronym. |
+| `GetExternalAgents` | `google.protobuf.Empty` | `GetExternalAgentsResponse` | Returns all unmanaged `ExternalAgent` records. |
+
+### 8.2. `sera.standard.v1.SeraAppService` (`sera_standard.proto`)
+Implemented by `SeraStandardServiceImpl` (`v1.2-universal`):
+* `GetAppInfo(Empty) -> AppInfoResponse`
+* `GetDeepHealth(Empty) -> DeepHealthResponse`
+* `GetFeedback(Empty) -> FeedbackResponse`
+* `GetChangelog(Empty) -> ChangelogResponse`
+* `GetDocs(Empty) -> DocsResponse`
+
+### 8.3. Outbound gRPC Integrations (`SNCConnector`)
+* **`core/connectors/snc_connector.py`:** Connects to the ServiceNow Connector (`snc_service_pb2_grpc.SnowConnectorServiceStub`) and invokes `CreateIncident(CreateIncidentRequest)` with `category="AI Ecosystem"`, `subcategory="Feedback Routing"`, and default `assignment_group="Systems Engineering"`.
+
+---
+
+## 9. User Interface (UI) & Visualizations 🖥️
+
+*Not applicable for this module.* AMU is a headless backend utility and CLI tool. Its gRPC responses are consumed and rendered by the **Sera Admin Module (SAM)** WebUI (e.g., `AmuTopologyWidget.jsx`).
+
+---
+
+## 10. Background Services & Workers 🛠️
+
+### 10.1. Background Auto-Rediscovery Daemon (`grpc_api/services.py`)
+* **Execution Trigger:** Spawned automatically as a Python daemon thread (`threading.Thread(target=background_discovery, daemon=True)`) when `start-grpc-server` starts, provided `discovery.auto_rediscover_enabled` is `true` in `config/settings.yaml`.
+* **Timing & Cadence:** Waits `initial_delay_seconds` (`300` seconds / 5 minutes) after server boot before executing the first sweep, then loops indefinitely every `interval_seconds` (`86400` seconds / 24 hours).
+* **Operational Logic:** Instantiates `RegistryManager()` and calls `rediscover_existing()`, which queries all active applications from PostgreSQL and re-executes `register_endpoint()` against their registered gRPC endpoints to refresh versions, LLM models, services, and dependency topologies.
+* **Fault Isolation:** Wrapped in a broad `try...except Exception` block so transient database or network failures log an error without terminating the daemon thread.
+
+### 10.2. Concurrent Health Polling Pool (`GetAggregatedHealth`)
+* Uses an ephemeral `concurrent.futures.ThreadPoolExecutor(max_workers=20)` per `GetAggregatedHealth` request to prevent sequential timeout cascades when polling dozens of microservices simultaneously.
+
+---
+
+## 11. CLI, Tooling & Testing 💻
+
+AMU provides a rich administrative CLI via `python3 application_management_utility.py <group> <command>`:
+
+| Command Group | Command & Arguments | Operational Purpose |
+| :--- | :--- | :--- |
+| **Root** | `start-grpc-server` | Compiles protos if needed, initializes DB tables, and starts the gRPC server on `:50102`. |
+| **Root** | `init-db [--force]` | Creates PostgreSQL tables (`--force` drops and recreates all tables via `reset_db()`). |
+| **`module`** | `module info [--grpc]` | Calls AMU's own `SeraAppService.GetAppInfo` endpoint. |
+| **`module`** | `module check-health [--grpc]` | Calls AMU's own `SeraAppService.GetDeepHealth` endpoint. |
+| **`registry`** | `registry register [--endpoint \| --path \| --auto \| --rediscover]` | Registers a single endpoint, parses `config/settings.yaml` from a path, sweeps ports `50051-50150` & `7888-7899`, or triggers gRPC `RediscoverApps`. |
+| **`registry`** | `registry list` | Queries PostgreSQL directly and prints a table of all registered apps, versions, endpoints, and active statuses. |
+| **`registry`** | `registry deps [--grpc]` | Prints the full dependency DAG from PostgreSQL including environment, network boundary, and sanitized connection metadata. |
+| **`registry`** | `registry delete <acronym>` | Deletes an application and its cascading services/dependencies from PostgreSQL. |
+| **`info`** | `info ports [--grpc]` | Displays listening ports, Frontend Planner (`7888+`), gRPC Port Blocks (`50051-50150`), and Docker ports, cross-referenced against registered apps. |
+| **`info`** | `info list-apps [acronym] [--grpc]` | Calls `ListRegisteredApps` via gRPC and displays grouped dependencies (`infra`, `connector`, `internal`, `external`), services, and LLM engines. |
+| **`info`** | `info get-changelog <acronym> [--limit N] [--grpc]` | Fetches and formats the parsed `CHANGELOG.yaml` for a specific application. |
+| **`info`** | `info get-docs <acronym> [--grpc]` | Fetches the design documentation markdown for an app (truncates console preview to 500 chars unless `--grpc` is passed). |
+| **`info`** | `info deployments [--acronym X] [--grpc]` | Displays deployment table showing `MANAGED`, `EXT`, `sera_standard` version, `physical_path`, and `services`. |
+| **`info`** | `info export-settings` | Reads `config/settings.yaml` from every registered app's `physical_path` and dumps a consolidated `output/debug_settings.yaml` file. |
+| **`info`** | `info codebase` | Walks all registered `physical_path` directories (excluding `.venv`, `node_modules`, `.git`, etc.) and calculates Lines, Characters, and estimated Tokens (`chars // 4`) split by Code vs. Docs. |
+| **`health`** | `health get-all [--grpc]` | Calls `GetAggregatedHealth` for all active applications. |
+| **`health`** | `health get <acronym> [--grpc]` | Calls `GetAggregatedHealth` for a single application acronym. |
+| **`releases`** | `releases summary [--grpc]` | Iterates across all active apps, fetches changelogs, and prints a summary table of total versions, total updates, and category breakdowns. |
+| **`audit`** | `audit llms` | Audits registered cognitive engines, flagging non-`aif.gt-t.net` URLs and legacy `gemma-3` models. |
+| **`audit`** | `audit infra` | Audits `infra` dependencies, separating production-ready apps from apps using `dev` infrastructure (grouped by dev database name). |
+| **`deploy`** | `deploy push-std [acronym]` | Copies AMU's `grpc_api/sera_standard_service.py` to target STD-enabled apps, restarts their systemd gRPC service, waits up to 30s for readiness, re-registers the app, and prints a colorized `difflib` unified diff of pre/post `GetAppInfo` and `GetDeepHealth` payloads. |
+| **`git`** | `git status <acronym> [--grpc]` | Checks uncommitted changes and latest commit message for a managed app. |
+| **`git`** | `git commit <acronym> -m "..." [--author-name] [--author-email]` | Syncs `settings.yaml` version, commits all changes, and pushes to GitLab. |
+| **`git`** | `git history <acronym> [--limit 10]` | Lists recent Git commits for a managed app. |
+| **`git`** | `git rollback <acronym> [--commit HASH]` | Rolls back an app to a previous commit (interactive prompt if `--commit` is omitted). |
+| **`git`** | `git sync [--acronym X] [--message "..."] [--dry-run] [--minor-only] [--debug] [--author "..."]` | Runs the streaming LLM `SmartSyncAppChanges` workflow across one or all managed local apps. |
+| **`git`** | `git sync-docs` | Iterates over all git repositories inside `/ai/assets/guides`, committing and pushing pending changes with message `"Guides Sync"`. |
+
+---
+
+## 12. Configuration, Security & Hardware Affinity 🔒
+
+### 12.1. Configuration Schema (`config/settings.yaml`)
+
+| YAML Key Path | Purpose & Operational Impact | Configured / Default Value |
+| :--- | :--- | :--- |
+| `module_info.name` | Human-readable application name. | `"Application Management Utility"` |
+| `module_info.version` | Current semantic version (auto-synced with `CHANGELOG.yaml`). | `"0.3.9"` |
+| `module_info.acronym` | Unique ecosystem identifier. | `"AMU"` |
+| `module_info.category` | Architectural classification. | `"Utility"` |
+| `system_services.grpc.service_name` | Systemd unit name for health & restart orchestration. | `"amu-grpc.service"` |
+| `system_services.grpc.host` | gRPC bind address. | `"0.0.0.0"` |
+| `system_services.grpc.port` | gRPC listening port. | `50102` |
+| `system_services.grpc.max_workers` | ThreadPoolExecutor worker count for concurrent RPC handling. | `50` |
+| `database.write_dsn` | Primary PostgreSQL read/write connection string. | `postgresql://...@slo-aif-hadb.slo.gt-t.net:5432/sam_admin_prod_db` |
+| `database.read_dsn` | Read-replica PostgreSQL connection string. | `postgresql://...@slo-aif-ha.slo.gt-t.net:5433/sam_admin_prod_db` |
+| `external_services.vault.url` | HashiCorp Vault cluster URL for secret and API key retrieval. | `"https://vault-aif.gt-t.net:8200"` |
+| `external_services.vault.role_id` | AppRole Role ID for Vault authentication. | *(Configured in `settings.yaml`)* |
+| `external_services.vault.secret_id` | AppRole Secret ID for Vault authentication. | *(Configured in `settings.yaml`)* |
+| `vault_paths.llm_api_key` | Vault KV v2 secret path storing the LLM proxy API key. | `"haproxy/global/apps/amu-prod"` |
+| `logging.level` | Console log level when running in server mode. | `"INFO"` |
+| `logging.directory` | Shared volume path for daily rotated log files. | `"/ai/assets/logs/amu_utility"` |
+| `logging.enable_file_logging` | Enables `MultiProcessSafeDailyLogger` file handlers. | `true` |
+| `paths.proto_source_dir` | Local relative directory containing `amu.proto`. | `"grpc_api/protos"` |
+| `paths.sera_proto_source_dir` | Global shared directory for `sera_standard.proto`. | `"/ai/assets/protos/sera_standard"` |
+| `paths.generated_stubs_path` | Output directory for compiled `*_pb2.py` stubs. | `"/ai/assets/protos/application_management_utility/generated"` |
+| `external_services.gitlab.url` | GitLab base URL for GitOps push operations. | `"https://gitlab.gt-t.net"` |
+| `external_services.gitlab.bot_username` | URL-encoded GitLab bot username. | `"martin.kecka%40gtt.net"` |
+| `external_services.gitlab.bot_token` | GitLab Personal Access Token (`glpat-...`). | *(Configured in `settings.yaml`)* |
+| `discovery.auto_rediscover_enabled` | Enables the background rediscovery thread in `services.py`. | `true` |
+| `discovery.interval_seconds` | Time between background rediscovery sweeps. | `86400` (24 hours) |
+| `discovery.initial_delay_seconds` | Startup delay before first background sweep. | `300` (5 minutes) |
+| `llm_engines.primary.provider` | Inference server type. | `"vllm"` |
+| `llm_engines.primary.base_url` | AI Factory vLLM load balancer endpoint. | `"https://aif-llm-gemma4-31b.aif.gt-t.net"` |
+| `llm_engines.primary.model` | Exact model identifier for `SmartSyncOrchestrator`. | `"google/gemma-4-31B-it"` |
+| `llm_engines.primary.timeout_seconds` | HTTP request timeout for LLM calls. | `300` |
+| `llm_engines.primary.max_tokens` | Max completion tokens. | `32768` |
+| `llm_engines.primary.enable_thinking` | Enables reasoning mode in `chat_template_kwargs`. | `"enable"` |
+
+### 12.2. Security, Credential Sanitization & Permissions
+* **DSN Credential Stripping:** `SeraStandardServiceImpl.GetDeepHealth` sanitizes all database and Redis/Valkey URLs via `sanitize_dsn()` before transmitting them over gRPC or persisting them in `app_dependencies.connection_data`, ensuring plaintext passwords never leak into the registry database or SAM UI.
+* **Dynamic GitLab Auth Injection & Log Obfuscation:** `GitOpsManager` injects GitLab bot credentials ephemerally per command using `git -c url.<scheme>://<encoded_user>:<encoded_token>@<host>/.insteadOf=<gitlab_url> push origin` so tokens are never written to `.git/config`. Both raw and URL-encoded tokens are scrubbed (`***`) from `output_log` strings before returning over gRPC.
+* **Filesystem Permission Healing:** Because `GitOpsManager.rollback_and_push` executes `git reset --hard`, which can alter file ownership/permissions under the service user, it immediately executes `chmod -R g+w <physical_path>` so group operators do not encounter IDE permission errors.
+
+### 12.3. Hardware Affinity & Execution Boundaries
+* AMU is a lightweight CPU-bound service running locally on the application host via `systemd` (`amu-grpc.service`). It requires local filesystem access to `/ai/` (to manage repositories and read `settings.yaml` / `CHANGELOG.yaml`), `/proc/` and `ss`/`docker` (for `PortManager`), and network access to the Slough AI Factory (`slo-aif-hadb.slo.gt-t.net` for PostgreSQL, `vault-aif.gt-t.net` for Vault, and `aif.gt-t.net` for vLLM).
+
+---
+
+## 13. Error Handling & Resilience 🛡️
+
+1. **SmartSync Large-Payload Safety Abort (`> 5,000` Tokens):**
+   * If `vLLMClient` fails to respond or returns unparseable JSON after `3` attempts (`max_retries = 3`), `SmartSyncOrchestrator` checks `token_estimate`.
+   * If `token_estimate <= 5000`, it fails open and defaults to a `MINOR` sync so small fixes are not blocked by transient LLM outages.
+   * If `token_estimate > 5000`, it **aborts the sync** (`SYNC ABORTED (SAFETY)`) rather than silently committing a massive feature update as a `MINOR` change without a changelog entry or version bump.
+2. **LLM YAML Hallucination Recovery:**
+   * When `SmartSyncOrchestrator` receives malformed YAML in `new_changelog_yaml`, it catches `yaml.YAMLError`, applies multiline regex normalization to repair indentation of `- category:` and `  items:`, and re-validates before failing the attempt.
+3. **Exponential Backoff on Cognitive Engines:**
+   * `vLLMClient.get_chat_completion` retries failed HTTP requests up to `3` times with exponential backoff (`sleep_time = 2 ** attempt` $\rightarrow$ `2s`, `4s`).
+4. **Non-Destructive Git Rollback Recovery:**
+   * `GitOpsManager.rollback_and_push` uses a hard-reset + soft-reset pattern (`reset --hard <target>` followed by `reset --soft <original_HEAD>`) to create a forward commit rather than force-pushing history rewrites. If `git commit` fails, it automatically executes `git reset --hard <original_HEAD>` to restore the working tree to its pre-rollback state.
+5. **Database Connection Resilience:**
+   * Both `_write_engine` and `_read_engine` enable `pool_pre_ping=True` to transparently recycle stale PostgreSQL connections across HA failovers, and `get_db_session` guarantees automatic `session.rollback()` on unhandled exceptions.
+
+---
+
+## 14. Future Enhancements & Roadmap 🚀
+
+The following capabilities define the future architectural state of AMU, extending its role as the definitive control plane for application portfolio management, automated GitOps, and developer onboarding while resolving existing technical debt.
+
+### 14.1. API Payload Separation (`GetAppInfo` vs `GetDeepHealth`)
+Once all registered ecosystem modules have been upgraded to `sera_standard.proto` (`v1.2-universal`), the standard contract will be refactored to decouple static topology definitions from high-frequency health telemetry:
+- **Static Registration (`GetAppInfo`):** Transmit full dependency metadata (`connection_metadata`, `dependency_group`, `dependency_type`, sanitized DSNs) exclusively during initial registration and daily rediscovery sweeps.
+- **Lightweight Health Polling (`GetDeepHealth`):** Strip static connection dictionaries from `GetDeepHealth` responses, reducing high-concurrency fan-out payloads (`GetAggregatedHealth`) to lightweight status enums (`OK`, `DEGRADED`, `DOWN`) and latency metrics.
+
+### 14.2. Automated End-to-End Application Scaffolding (`ScaffoldApp`)
+To eliminate the manual bootstrapping steps defined in the Application Deployment Guide (`dep_concept.md`), AMU will expose a unified scaffolding workflow orchestrated from the SAM UI or AMU CLI:
+- **Port & Resource Provisioning:** Query `PortManager` for available Frontend (`7888+`) and gRPC (`50051-50150`) port blocks while invoking CMU's gRPC endpoints (`DbCreate`, `CreateCache`, `IdentityCreate`) to provision dedicated PostgreSQL databases, Valkey DB indices, and Keycloak/HAProxy identities.
+- **Template Hydration:** Copy `/ai/scaffolding/application` to `/ai/<app_folder_name>`, perform deterministic placeholder replacement (`<APP_NAME>`, `<APP_ACRONYM>`, `<APP_ACRONYM_LOWER>`, `<APP_DESCRIPTION>`, `<APP_FOLDER_NAME>`), rename CLI and systemd unit files (`<acronym>_cli.py`, `<acronym>-api.service`, `<acronym>-grpc.service`), and inject the newly provisioned Vault DSNs, secrets, and ports directly into `config/settings.yaml`.
+- **Gateway & Portfolio Onboarding:** Automatically invoke the GIA Gateway registration (`deploy register-module` to configure reverse-proxy routing and provision `Users`/`Admins` AD groups) and register the live gRPC endpoint into AMU's portfolio database.
+
+### 14.3. Automated Architecture Documentation Synchronization (`SmartDocSync`)
+Extend the GitOps orchestration engine with a dedicated gRPC endpoint and CLI workflow to automatically maintain `[acronym]_design.md` files in lockstep with codebase updates, eliminating manual `[NEEDS_DOCS]` tracking:
+- **Single-Pass Cognitive Shortcut:** Rather than re-evaluating raw diffs from scratch or executing complex multi-pass section routers, the orchestrator leverages the newly generated `CHANGELOG.yaml` entry (`new_yaml`) as a high-level semantic index alongside the full `[acronym]_design.md` file in a single dedicated LLM call (`google/gemma-4-31B-it` with `enable_thinking: "enable"`).
+- **Context-Capped Structural Diff Injection:** To prevent context bloat (greater than 30k tokens) and preserve LLM attention on exact character matching, raw code diffs are capped at a strict threshold (~3,000–4,000 tokens). For small commits, the full diff is passed as reference; for massive commits, Python injects `git diff --stat`, the Map-Reduce feature summary, and prioritized structural file diffs (`*.proto`, `config/settings.yaml`, `models.py`, CLI definitions) so the model retains exact parameter names, thresholds, and schemas without KV-cache degradation.
+- **Content-Anchored Surgical Patching (`SEARCH / REPLACE` Hunks):** Full-document regeneration is strictly prohibited to prevent middle-section truncation and table summarization. Operating with `json_mode=False` to avoid multi-line Markdown escaping corruption, the LLM emits conflict-marker patch blocks (`<<<<<<< SEARCH ... ======= ... >>>>>>> REPLACE`) anchored by 2–5 lines of surrounding context (or `NO_DOC_CHANGES` if the update is purely internal/trivial).
+- **Deterministic Verification & Symlink Persistence:** Python validates that each `SEARCH` block matches a unique substring in `[acronym]_design.md` before applying the replacement in-memory, deterministically bumps the top-level `**Version:**` and `**Date:**` metadata headers via regex, writes the updated content through the `docs/[acronym]_design.md` symlink to the central `/ai/assets/guides/` repository, and triggers an automated `git sync-docs` commit/push.
+
+### 14.4. Automated Ecosystem Compliance Scoring Matrix
+Introduce a quantitative compliance engine within `ApplicationManagementService` to grade all registered modules against the Ecosystem Configuration (`conf_concept.md`) and Documentation (`docs_concept.md`) standards:
+- **Validation Rules:** Automatically verify the presence of central `/ai/assets/guides/` symlinks, valid `docs_concept.md` metadata headers, structured `CHANGELOG.yaml` schemas, production AI Factory LLM endpoints (`aif.gt-t.net` on `gemma4`), and split read/write HA PostgreSQL DSNs.
+- **SAM UI Integration:** Expose per-application compliance scores and actionable remediation checklists directly within the SAM UI portfolio dashboard.
+
+### 14.5. End-to-End Feedback Loop & ITSM Automation
+Wire the existing `FeedbackTicket` SQLAlchemy model and `SNCConnector` (`SnowConnectorServiceStub`) into an active background worker:
+- **Automated Polling & Triage:** Periodically poll `GetFeedback` across all registered UI assistants, classify incoming user feedback via `vLLMClient` (distinguishing Bug Reports, Feature Requests, and Operational Questions), and persist the enriched summary to PostgreSQL.
+- **ServiceNow Incident Routing:** Automatically dispatch validated bugs and infrastructure issues to ServiceNow via `SNCConnector.CreateIncident` and sync the resulting `snow_ticket_number` back to the application record.
+
+### 14.6. Centralized Observability & Database Namespace Alignment
+- **Database Table Prefixing (`amu_*`):** Because all SAM administrative utilities (AMU, CMU, HMU, OMU) share the `sam_admin_prod_db` PostgreSQL database, future schema migrations will standardize AMU's ORM tables with a strict `amu_` prefix (`amu_applications`, `amu_app_services`, `amu_app_dependencies`, `amu_feedback_tickets`, `amu_external_agents`) to guarantee zero namespace collisions and safe schema maintenance across utilities.
+- **Distributed Log Querying (VictoriaLogs):** Expand AMU's observability capabilities beyond shared filesystem log inspection (`/ai/assets/logs/`) by integrating with VictoriaLogs to query and correlate logs by `trace_id` across multi-agent execution chains.

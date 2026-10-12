@@ -18,11 +18,13 @@ HAM orchestrates the visualization of complex infrastructure telemetry, fulfilli
 HAM is engineered on a strict Aggregator (Backend-for-Frontend) pattern. The FastAPI backend does not duplicate the heavy lifting of localized infrastructure management. Instead, it maintains a lightweight footprint, serving the React frontend while fanning out gRPC requests to the headless SERA/GIA (AI Factory) utility swarm running on the physical hardware nodes.
 
 * **HAU (Halo Admin Utility):** HAM interfaces with HAU to manage individual tenant Kubernetes deployments, execute GitOps configuration pushes, configure the tenant-specific Halo Keycloak instances, and monitor the underlying Morpheus data processing pipelines.
-* **CMU (Configuration Management Utility):** HAM interfaces with CMU exclusively for global AI asset orchestration, specifically handling the dynamic deployment of LoRA weights and the provisioning of global LLM authentication tokens required by the individual tenants.
+* **CMU (Configuration Management Utility) (Planned):** HAM will interface with CMU exclusively for global AI asset orchestration, specifically handling the dynamic deployment of LoRA weights and the provisioning of global LLM authentication tokens required by the individual tenants.
 
 ```mermaid
 flowchart TD
-    UI["HAM-WebUI (Vite/React)"] -->|"REST API (JWT)"| API["HAM-Backend (FastAPI)"]
+    User["User"] --> GW["GIA Gateway (AD / SSO)"]
+    GW -->|"X-Forwarded Headers"| UI["HAM-WebUI (Vite/React)"]
+    UI -->|"REST API"| API["HAM-Backend (FastAPI)"]
     
     subgraph HAM_Module ["HAM Module"]
     API --> Cache[("Valkey/Redis DB 9 - Ephemeral State")]
@@ -31,7 +33,7 @@ flowchart TD
     
     subgraph SERA_GIA_Utilities ["SERA/GIA (AI Factory) Utilities"]
     API -- gRPC --> HAU["HAU: Kube Pipelines, GitOps, Tenant Keycloak"]
-    API -- gRPC --> CMU["CMU: LoRA Weights & Global LLM Tokens"]
+    API -. gRPC .-> CMU["CMU: LoRA Weights & Global LLM Tokens (Planned)"]
     end
     
     HAU --> Kube["Kubernetes Clusters"]
@@ -39,18 +41,73 @@ flowchart TD
 ```
 
 ## 3. Module File Map
-* **/ui/:** The Vite/React frontend containing the estate-wide monitoring dashboards, GitOps Command Center, and Feature Catalog matrices.
-* **/rest_api/:** The FastAPI HTTP layer providing secure, authenticated boundaries, handling JWT validation, and JSON serialization (`main.py`, `routers/`, `dependencies.py`).
-* **/grpc_api/:** The gRPC aggregator endpoints (`sera_standard_service.py`) handling incoming standard network health probes.
-* **/core/connectors/:** The explicit gRPC client stubs utilized to interrogate the downstream utility cluster (`hau_connector.py`).
-* **/core/database/:** SQLAlchemy ORM models tracking the persistent operational state, release histories, and audit logs.
-* **/core/io_handlers/:** Centralized classes for managing isolated read/write database operations (`sql_reader.py`, `sql_writer.py`) and high-speed cache retrieval (`redis_handler.py`).
-* **/config/settings.yaml:** The absolute source of truth defining distributed endpoints, cache eviction policies, and RBAC authentication targets.
+
+```text
+/ai/halo_admin_module/
+├── cli/                            
+│   ├── commands/                   
+│   │   ├── cache_cmds.py           # Domain-specific CLI commands for manually flushing the Redis cache
+│   │   └── module_cmds.py          # Standard module operational status and health commands
+│   └── ham_cli.py                  # Main CLI entry point utilizing Click to group sub-commands
+├── config/                         
+│   └── settings.yaml               # Standard ecosystem configuration defining the main source of truth for all variables
+├── core/                           
+│   ├── connectors/                 
+│   │   └── hau_connector.py        # gRPC client logic to communicate with the downstream HAU service for GitOps execution
+│   ├── database/                   
+│   │   ├── database.py             # Database engine and SQLAlchemy session factory initialization
+│   │   ├── default_rules.py        # Default governance rules for automated state transitions
+│   │   └── models.py               # SQLAlchemy ORM data models representing persistent state audit logs
+│   ├── io_handlers/                
+│   │   ├── redis_handler.py        # Handles high-speed telemetry and ephemeral state retrieval from Valkey/Redis
+│   │   ├── sql_reader.py           # Handles reading operational state from the PostgreSQL database
+│   │   └── sql_writer.py           # Handles persisting operational state transitions into PostgreSQL
+│   └── llm_interface.py            # Handles programmatic interactions with reasoning models for diagnostic tasks
+├── docs/                           
+│   ├── CHANGELOG.yaml              # Track changes and version history
+│   └── ham_design.md               # Main architecture document describing the module design
+├── grpc_api/                       
+│   ├── generate_stubs.py           # Python script to compile .proto files into stubs
+│   ├── sera_standard_service.py    # Required SERA standard implementation (AppInfo, DeepHealth) for network probes
+│   └── services.py                 # Core gRPC service implementations
+├── rest_api/                       
+│   ├── routers/                    
+│   │   ├── configuration.py        # FastAPI resource handling feature catalog and toggle endpoints
+│   │   ├── docs.py                 # FastAPI resource handling documentation retrieval
+│   │   ├── gitops.py               # FastAPI resource handling GitOps orchestrations and releases
+│   │   ├── inventory.py            # FastAPI resource handling multi-tenant topology endpoints
+│   │   └── users.py                # FastAPI resource handling user access and permissions
+│   ├── dependencies.py             # Shared API dependencies for JWT validation and RBAC parsing
+│   ├── main.py                     # FastAPI application initialization and middleware setup
+│   └── schemas.py                  # Pydantic models for REST request/response validation
+├── scripts/                        # Maintenance and one-off testing scripts (e.g., debug_llm_payload.py)
+├── ui/                             # Vite/React frontend application for the admin dashboard
+│   ├── public/                     # Static frontend assets (e.g., favicon, launcher-icon)
+│   ├── src/                        
+│   │   ├── components/             # Reusable global UI components (MarkdownRenderer, Mermaid diagrams, Glossaries)
+│   │   ├── constants/              # Static frontend configurations and glossary definitions
+│   │   ├── features/               # Dedicated React sub-components grouped by feature area (configuration, documentation, gitops, inventory)
+│   │   ├── pages/                  # Top-level React view components pointing to features (e.g., InventoryPage.jsx)
+│   │   ├── services/               # REST API caller functions to interact with the FastAPI backend
+│   │   ├── theme.js                # Material UI theme definitions (colors, typography)
+│   │   └── App.jsx                 # Root React application component and routing layout
+│   ├── index.html                  # Main HTML entry point for the Vite app
+│   ├── package.json                # Frontend package dependencies and build scripts
+│   └── vite.config.js              # Vite configuration, including proxy setup to the Python FastAPI backend
+├── utils/                          
+│   ├── config_loader.py            # Standardized function to load settings.yaml
+│   └── logging_setup.py            # Standardized logging definition setup
+├── bootstrap_helper.py             # Standard initialization script managing virtual environments and dependencies
+├── deploy.sh                       # Standard script for deploying or restarting the systemd services
+├── halo_admin_module.py            # Main application entry point that bootstraps the FastAPI/gRPC and CLI
+├── README.md                       # High-level overview of the module with links to core documentation
+└── requirements.txt                # Python backend package dependencies
+```
 
 ## 4. Core Processing Lifecycle
 * **Bootstrapping:** The FastAPI backend initializes, injecting environment variables, and establishing the SQLAlchemy connection pools to the PostgreSQL database.
 * **State Caching:** The `gitops_daemon` background task executes an immediate sweep via the HAU connector, pre-warming the Valkey/Redis cache with macro-level ecosystem topology, container tags, and branch structures.
-* **Request Authentication:** Inbound REST requests from the React UI are intercepted by `get_current_user`. The gateway-injected headers (`X-Forwarded-Full-Name`, `X-Forwarded-Groups`) are parsed to resolve strict RBAC parameters (e.g., `can_promote_release`).
+* **Request Authentication:** Inbound REST requests from the React UI are intercepted by `get_current_user`. The upstream GIA Gateway (which handles AD/SSO authentication) injects identity headers (`X-Forwarded-Full-Name`, `X-Forwarded-Groups`) which are parsed to resolve strict RBAC parameters (e.g., `can_promote_release`).
 * **Aggregated Response:** Depending on the route, HAM either serves the payload instantly from the Redis cache (for high-frequency telemetry) or proxies a synchronous gRPC call to HAU. Operational state transitions (e.g., triggering a release) are captured and persisted into the PostgreSQL database before the HTTP response is returned.
 
 ## 5. Detailed Business Logic & Rules
