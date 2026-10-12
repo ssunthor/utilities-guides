@@ -1,6 +1,6 @@
-# Sera Admin Module (SAM) - Architecture Document
+# Sera Admin Module (SAM) - Architecture & Design Document
 
-**Doc_Type:** Architecture  
+**Doc_Type:** Architecture & Design  
 **Category:** (AM) Admin Module  
 **Name:** Sera Admin Module  
 **Acronym:** SAM  
@@ -20,15 +20,15 @@ The primary goal of SAM is to replace disparate administrative tools with a sing
 SAM operates on a **Backend-for-Frontend (BFF) / Aggregator** pattern:
 1. **`SAM-WebUI` (React/Vite):** The graphical user interface providing multi-domain operational dashboards.
 2. **`SAM-Backend` (FastAPI & gRPC):** The central aggregation server, caching layer, and autonomous SRE diagnostic engine that fans out requests to specialized, headless gRPC utility modules.
-3. **Headless Utility Ecosystem:** Five active, independent gRPC utility services (`HMU`, `AMU`, `OMU`, `DIU`, `CMU`) that execute domain-specific infrastructure introspection and management.
+3. **Headless Utility Ecosystem:** Core, specialized gRPC utility services (`HMU`, `AMU`, `OMU`, `DIU`, `CMU`) that execute domain-specific infrastructure introspection and management.
 
 Its primary operational capabilities include:
-- **Single-Pane Observability & Hardware Telemetry:** Aggregating real-time NVIDIA DCGM GPU metrics, node OS telemetry, vLLM engine states, and 3-layer network routing across PRG, SLO, and NYC via HMU (`:50101`).
+- **Single-Pane Observability & Hardware Telemetry:** Aggregating real-time NVIDIA DCGM GPU metrics, node OS telemetry, vLLM engine states, and 3-layer network routing across PRG, SLO, and NYC via HMU.
 - **Autonomous SRE Reasoning & Incident Triage:** Continuous 60s rule evaluation using a dedicated Gemma-4-31B cognitive engine to deduce root causes and prescribe actionable remediation for hardware faults, traffic saturation, zombie models, and pod degradation.
-- **Application Portfolio & GitOps Orchestration:** Authoritative ecosystem registry, multi-service dependency mapping, unified changelog tracking, and automated GitOps commit/rollback workflows via AMU (`:50102`).
-- **Fleet-Wide Stateful Infrastructure Introspection:** Real-time cluster health, kernel auditing, and pending OS update tracking across Patroni, Valkey, Kafka, Qdrant, DCS/etcd, Vault, and Kubernetes via OMU (`:50104`).
-- **Identity Lifecycle & Secrets Governance:** Streamlined provisioning and auditing of Keycloak OIDC confidential clients and native HAProxy API keys with HashiCorp Vault KV v2 secret synchronization via CMU (`:50105`).
-- **Knowledge Base & RAG Pipeline Quality Assurance:** Deep hierarchical space browsing, chunk boundary inspection, synthesized Q&A analysis, and vector store validation via DIU (`:50109`).
+- **Application Portfolio & GitOps Orchestration:** Authoritative ecosystem registry, multi-service dependency mapping, unified changelog tracking, and automated GitOps commit/rollback workflows via AMU.
+- **Fleet-Wide Stateful Infrastructure Introspection:** Real-time cluster health, kernel auditing, and pending OS update tracking across Patroni, Valkey, Kafka, Qdrant, DCS/etcd, Vault, and Kubernetes via OMU.
+- **Identity Lifecycle & Secrets Governance:** Streamlined provisioning and auditing of Keycloak OIDC confidential clients and native HAProxy API keys with HashiCorp Vault KV v2 secret synchronization via CMU.
+- **Knowledge Base & RAG Pipeline Quality Assurance:** Deep hierarchical space browsing, chunk boundary inspection, synthesized Q&A analysis, and vector store validation via DIU.
 - **Combinatorial Endpoint Benchmarking & ROI Cost Tracking:** Automated load testing across concurrency steps and financial token usage analytics against commercial frontier models (GPT-5, Claude Opus, Gemini Pro).
 
 ---
@@ -395,7 +395,7 @@ All caching and distributed mutex locks are strictly typed via `CacheRegistry` i
 Implements the universal SERA ecosystem standard contract (`sera.standard.v1.SeraAppService`, maintained centrally by AMU) on port `50103` for ecosystem self-reporting:
 - **`GetAppInfo`:** Returns SAM metadata, version (parsed from `docs/CHANGELOG.yaml`), systemd service states (`sam-api.service`, `sam-grpc.service`), downstream dependencies, and configured LLM models.
 - **`GetDeepHealth`:** Performs live TCP socket pings (1.0s timeout) against PostgreSQL (`write_dsn`, `read_dsn`), Valkey (`ui_cache_url`, `aux_cache_url` with `__GIA_DB_OWNER__` lookup), all 5 gRPC connectors (`hmu`, `amu`, `omu`, `diu`, `cmu`), and external services (`vault-aif_api`), returning a sanitized `DependencyHealth` matrix.
-- **`GetChangelog` / `GetDocs` / `GetFeedback`:** Returns raw YAML changelog and Markdown design documentation.
+- **`GetChangelog` / `GetDocs` / `GetFeedback` / `UpdateFeedback`:** Returns raw YAML changelog, Markdown design documentation, and handles user feedback ingestion.
 
 ### 8.2. REST API Routers (`rest_api/routers/` - Port `7890`)
 - **HMU (`/api/hmu`):**
