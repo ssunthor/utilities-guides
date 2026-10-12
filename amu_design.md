@@ -15,25 +15,33 @@
 
 The **Application Management Utility (AMU)** is a headless, centralized gRPC microservice and CLI orchestration engine designed to govern **Application Portfolio Management (APM)**, **GitOps Automation**, and **ITSM Integration** across the SERA/GIA AI ecosystem.
 
-Operating as an autonomous, fully functional application on port `50102`, AMU provides engineers and operators with a rich Click CLI for ecosystem auditing, compliance verification, and GitOps rollouts. Concurrently, it serves as the primary portfolio and GitOps backend data broker for the **Sera Admin Module (SAM)** web interface. Within the ecosystem's administrative utility suite (AMU, CMU, DIU, HMU, OMU), while HMU monitors physical infrastructure and CMU provisions resources, AMU governs the **logical reality** and application lifecycle of the platform.
+Operating as an autonomous, standalone control plane, AMU provides engineers and operators with a rich Click CLI for ecosystem auditing, compliance verification, and GitOps rollouts. Concurrently, it serves as the primary portfolio and GitOps backend data broker powering the **Sera Admin Module (SAM)** web interface. While physical infrastructure monitoring and resource provisioning are delegated to specialized utilities, AMU acts as the single source of truth governing the **logical reality** and application lifecycle of the platform.
 
-AMU acts as the single source of truth for registered microservices, unmanaged external agents, dynamic dependency graphing, network boundary classification, port allocation planning, distributed documentation/changelog aggregation, and LLM-driven GitOps synchronization. It maintains its persistent state in HA PostgreSQL (`sam_admin_prod_db`) and coordinates directly with HashiCorp Vault, GitLab, and the AI Factory's vLLM inference cluster.
+AMU persists its state in HA PostgreSQL (`sam_admin_prod_db`) and coordinates directly with HashiCorp Vault, GitLab, and the AI Factory's vLLM inference cluster.
+
+Its primary operational capabilities include:
+- **Application Portfolio Governance (APM):** Authoritative registry for all registered microservices and unmanaged external agents, inter-service dependency graphs, network boundary classifications (`LOCAL`, `AI_FACTORY`, `CORPORATE`, `EXTERNAL`), and port allocation planning (`50051-50150` gRPC blocks and `7888+` frontend blocks).
+- **Universal Standard Contract Custodian:** Ecosystem reference implementation and distribution authority for the universal SERA standard contract (`sera_standard.proto`), propagating unified metadata, changelog, and deep health protocols across all modules.
+- **Real-Time Aggregated Health Fan-Out:** High-concurrency parallel polling of active microservices, dynamic dependency health matrix aggregation, and automatic database version self-healing.
+- **Autonomous GitOps & SmartSync Engine:** Map-Reduce LLM diff evaluation, automated `CHANGELOG.yaml` categorization, semantic version bumping, and git commit/push workflows.
+- **Ecosystem Compliance & Infrastructure Auditing:** Automated verification of production AI Factory LLM endpoints, legacy model deprecation tracking, and dev vs. prod database isolation audits.
+- **ITSM & Feedback Triage:** Feedback collection pipeline with LLM-driven classification and automated incident dispatching to ServiceNow via SNC.
 
 ---
 
 ## 2. Architecture & Ecosystem Integration 🏗️
 
-AMU operates on a client-server architecture, exposing dual gRPC servicers on port `50102` (`amu-grpc.service`) backed by a multi-worker thread pool, while providing operators with a standalone Click CLI and background autonomous rediscovery daemons.
+AMU operates on a client-server architecture, exposing dual gRPC servicers backed by a multi-worker thread pool (`amu-grpc.service`), while providing operators with a standalone Click CLI and background autonomous rediscovery daemons.
 
 ### 2.1. Dual Servicer & Core Architectural Principles
 - **Dual Servicer Model:**
   1. **`ApplicationManagementService` (`amu.proto`):** Domain servicer exposing 17 RPCs for global portfolio management, real-time aggregated health fan-out, GitOps orchestration (`SmartSync`, commits, rollbacks), port scanning, and external agent lifecycle management.
-  2. **`SeraAppService` (`sera_standard.proto`):** AMU is the **ecosystem custodian and reference implementation** of the universal SERA standard contract (`v1.2-universal`). In addition to self-reporting AMU's own metadata, deep health matrix, documentation, and changelog, AMU maintains the master codebase deployed to all other ecosystem modules via `deploy push-std`.
-- **Single Source of Logical Reality:** Authoritative registry for all registered applications, port reservations (`50051-50150` gRPC blocks and `7888+` frontend blocks), and dynamic inter-service dependency topologies.
+  2. **`SeraAppService` (`sera_standard.proto`):** AMU is the **ecosystem custodian and reference implementation** of the universal SERA standard contract. In addition to self-reporting AMU's own metadata, deep health matrix, documentation, and changelog, AMU maintains the master codebase deployed to all other ecosystem modules via `deploy push-std`.
+- **Single Source of Logical Reality:** Authoritative registry for all registered applications, port reservations, and dynamic inter-service dependency topologies.
 - **Autonomous Standalone Operation:** Functions as a complete standalone system with direct HA PostgreSQL access (`_read_engine` / `_write_engine`), background rediscovery threads, and independent CLI audit commands.
 - **SAM Backend Data Broker:** Feeds live portfolio lists, multi-app aggregated health trees, and real-time streaming GitOps sync updates directly to the **Sera Admin Module (SAM)** UI.
-- **HA Persistence Isolation:** Utilizes split read/write SQLAlchemy connection pools (`write_dsn` on `:5432` and `read_dsn` on `:5433`) with `pool_pre_ping=True` and connection-hold prevention during long-running Git/LLM operations.
-- **Dynamic Call Tracing:** Automatically propagates and logs `x-client-id` metadata headers (`[SAM]`, `[CLI]`, `[ORCH]`) across all inbound RPCs for complete provenance auditing.
+- **High-Availability Persistence Isolation:** Utilizes split read/write SQLAlchemy connection pools (`write_dsn` on `:5432` and `read_dsn` on `:5433`) with `pool_pre_ping=True` and connection-hold prevention during long-running Git/LLM operations.
+- **Dynamic Call Tracing & Provenance:** Automatically propagates and logs `x-client-id` metadata headers (`[SAM]`, `[CLI]`, `[ORCH]`) across all inbound RPCs for complete provenance auditing.
 
 ### 2.2. Ecosystem Integration & Data Flow
 
@@ -337,7 +345,7 @@ AMU exposes two gRPC services on `0.0.0.0:50102` alongside standard gRPC Health 
 | `GetExternalAgents` | `google.protobuf.Empty` | `GetExternalAgentsResponse` | Returns all unmanaged `ExternalAgent` records. |
 
 ### 8.2. `sera.standard.v1.SeraAppService` (`sera_standard.proto`)
-Implemented by `SeraStandardServiceImpl` (`v1.2-universal`):
+Implemented by `SeraStandardServiceImpl` (master reference implementation):
 * `GetAppInfo(Empty) -> AppInfoResponse`
 * `GetDeepHealth(Empty) -> DeepHealthResponse`
 * `GetFeedback(Empty) -> FeedbackResponse`
@@ -475,7 +483,7 @@ AMU provides a rich administrative CLI via `python3 application_management_utili
 The following capabilities define the future architectural state of AMU, extending its role as the definitive control plane for application portfolio management, automated GitOps, and developer onboarding while resolving existing technical debt.
 
 ### 14.1. API Payload Separation (`GetAppInfo` vs `GetDeepHealth`)
-Once all registered ecosystem modules have been upgraded to `sera_standard.proto` (`v1.2-universal`), the standard contract will be refactored to decouple static topology definitions from high-frequency health telemetry:
+Once all registered ecosystem modules have been upgraded to the latest `sera_standard.proto`, the standard contract will be refactored to decouple static topology definitions from high-frequency health telemetry:
 - **Static Registration (`GetAppInfo`):** Transmit full dependency metadata (`connection_metadata`, `dependency_group`, `dependency_type`, sanitized DSNs) exclusively during initial registration and daily rediscovery sweeps.
 - **Lightweight Health Polling (`GetDeepHealth`):** Strip static connection dictionaries from `GetDeepHealth` responses, reducing high-concurrency fan-out payloads (`GetAggregatedHealth`) to lightweight status enums (`OK`, `DEGRADED`, `DOWN`) and latency metrics.
 

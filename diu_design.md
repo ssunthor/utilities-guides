@@ -15,25 +15,35 @@
 
 The **Data Inspector Utility (DIU)** is a dedicated administrative microservice and CLI inspection engine designed for developers, engineers, and administrators to query, inspect, and audit the contents of the SERA/GIA ecosystem's knowledge base. It provides a direct, low-level read interface to the relational and vector data stores populated by upstream ingestion pipelines such as the Confluence Ingestor (CFI).
 
-Operating as an autonomous, fully functional application on port `50109`, DIU provides developers and operators with a rich Click CLI (enhanced with `rich` terminal rendering) for debugging, schema validation, and RAG pipeline quality assurance. Concurrently, it serves as the specialized knowledge-base inspection backend powering the **Sera Admin Module (SAM)** web interface. Within the ecosystem's administrative utility suite (AMU, CMU, DIU, HMU, OMU), DIU delivers direct visibility into ingested knowledge assets and AI enrichments without requiring direct database access.
+Operating as an autonomous, standalone inspection control plane, DIU provides developers and operators with a rich Click CLI (enhanced with `rich` terminal rendering) for debugging, schema validation, and RAG pipeline quality assurance. Concurrently, it serves as the specialized knowledge-base inspection backend powering the **Sera Admin Module (SAM)** web interface, delivering direct visibility into ingested knowledge assets and AI enrichments without requiring direct database access.
 
-DIU enables targeted lookups and hierarchical exploration of ingested Confluence pages, document chunks, structured tables, category directory trees, and AI-generated enrichments (summaries, HyDE questions, semantic analyses, multi-page synthesized Q&As, and vision metadata) across **PostgreSQL** (`knowledge_base_db`) and **ChromaDB**.
+DIU connects to **PostgreSQL** (`knowledge_base_db`) and **ChromaDB**, synthesizing unified relational and high-dimensional vector representations.
+
+Its primary operational capabilities include:
+- **Targeted Document & Chunk Inspection:** Direct low-level lookup of ingested Confluence pages, markdown/text chunks, and chunk-level metadata by internal database IDs or native Confluence page IDs.
+- **Hierarchical Chunk Tree Expansion:** Dynamic in-memory recursive expansion of child chunks based on markdown header levels (`--expand`) to reconstruct full section context.
+- **Structured Table Resolution & Summaries:** Isolated JSON table parsing and extraction, linking tables to parent pages and attaching AI-generated table summaries.
+- **Navigational Directory Tree Reconstruction:** In-memory assembly of multi-level Confluence category hierarchies and directory page trees from flat database records.
+- **Multi-Dimensional Knowledge Base Statistics:** Real-time multi-metric aggregation (pages, chunks, word counts, summaries, HyDE questions, synthesized Q&A, and vision metadata) broken down per space with global totals.
+- **RAG & AI Enrichment Quality Assurance:** Inspection and validation of AI enrichments (HyDE questions, multi-page Synthesized Q&A, vision keywords/descriptions) across PostgreSQL and ChromaDB collections.
 
 ---
 
 ## 2. Architecture & Ecosystem Integration 🏗️
 
-DIU operates on a client-server architecture, exposing dual gRPC servicers on port `50109` (`diu-grpc.service`) backed by a multi-worker thread pool, while providing operators with a standalone Click CLI and dynamic schema synchronization engines.
+DIU operates on a client-server architecture, exposing dual gRPC servicers backed by a multi-worker thread pool (`diu-grpc.service`), while providing operators with a standalone Click CLI and dynamic schema synchronization engines.
 
 ### 2.1. Dual Servicer & Core Architectural Principles
 - **Dual Servicer Model:**
   1. **`DataInspectorUtility` (`diu.proto`):** Domain servicer providing targeted page and chunk lookups, structured table inspection, recursive category tree assembly, synthesized Q&A queries, and multi-dimensional database statistics.
-  2. **`SeraAppService` (`sera_standard.proto`):** Implements the universal SERA ecosystem contract (`v1.2-universal`, maintained centrally by AMU) for self-reporting DIU's metadata, deep health matrix, documentation, and changelog.
+  2. **`SeraAppService` (`sera_standard.proto`):** Implements the universal SERA ecosystem standard contract (maintained centrally by AMU) for self-reporting DIU's metadata, deep health matrix, documentation, and changelog.
 - **Client-Server Decoupling:** The CLI never touches the database directly. All operator commands and frontend queries route through gRPC stubs with automatic `x-client-id` metadata injection (`[DIU]`, `[SAM]`).
 - **Read-Only Aggregation:** Strictly an inspection engine; runtime operations never mutate underlying relational or vector knowledge stores, ensuring zero risk of accidental corruption during diagnostic exploration.
 - **SAM Knowledge-Base Backend:** Powers the knowledge-base inspection widgets, table exploration panels, and RAG pipeline diagnostic views within the **Sera Admin Module (SAM)** UI.
 - **Dynamic Schema Synchronization:** Uses automated AST/ORM introspection (`core/schema_generator.py`) against `confluence_ingestor.core.database.models` to generate strongly-typed Pydantic DTOs (`core/database/schemas.py`) and compiles Protobuf definitions on startup.
 - **Dual-Database Coordination:** Synthesizes unified views by joining relational metadata from PostgreSQL (`knowledge_base_db`) with high-dimensional chunk metadata from ChromaDB (`confluence_store` and related collections).
+- **High-Availability Persistence Isolation:** Utilizes SQLAlchemy QueuePool connection pooling with `pool_pre_ping=True`, `pool_recycle=1800`, and strict read-only session isolation.
+- **Dynamic Call Tracing & Provenance:** Automatically intercepts and logs `x-client-id` metadata headers (`[DIU]`, `[SAM]`) across all RPCs for complete provenance auditing.
 
 ### 2.2. Ecosystem Integration & Data Flow
 
@@ -48,7 +58,7 @@ graph TD
     subgraph DIU_Core ["Data Inspector Utility (DIU :50109)"]
         Interceptor["MetadataClientInterceptor (x-client-id)"]
         GRPC_DIU["DataInspectorUtilityServicer"]
-        GRPC_SERA["SeraStandardServiceImpl (v1.2)"]
+        GRPC_SERA["SeraStandardServiceImpl"]
         ServiceLayer["Core Services Layer (core/services.py)"]
         SQLReader["SQLReader (core/io_handlers/sql_reader.py)"]
         VDBReader["VDBReader (core/io_handlers/vdb_reader.py)"]
@@ -269,7 +279,7 @@ DIU exposes two gRPC services on port `50109` with gRPC Server Reflection and St
 | `GetDirectoryTree` | `GetDirectoryTreeRequest` | `GetDirectoryTreeResponse` | Unary | Returns recursively assembled `DirectoryNodeResponse` tree starting at `depth == 1`. |
 
 ### 8.2. `sera.standard.v1.SeraAppService` Contract (`grpc_api/sera_standard_service.py`)
-DIU implements the universal SERA standard contract (`sera.standard.v1.SeraAppService` - `v1.2-universal`), centrally maintained and deployed by the Application Management Utility (AMU). It provides standardized endpoints (`GetAppInfo`, `GetDeepHealth`, `GetFeedback`, `GetChangelog`, `GetDocs`) enabling AMU and the SAM UI to self-discover DIU's metadata, deep TCP socket dependency health matrix, changelog history, and design documentation without requiring custom integration logic.
+DIU implements the universal SERA standard contract (`sera.standard.v1.SeraAppService`), centrally maintained and deployed by the Application Management Utility (AMU). It provides standardized endpoints (`GetAppInfo`, `GetDeepHealth`, `GetFeedback`, `GetChangelog`, `GetDocs`) enabling AMU and the SAM UI to self-discover DIU's metadata, deep TCP socket dependency health matrix, changelog history, and design documentation without requiring custom integration logic.
 
 ---
 

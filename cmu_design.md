@@ -15,24 +15,34 @@
 
 The **Configuration Management Utility (CMU)** is a dedicated administrative microservice and CLI control plane within the SERA/GIA AI ecosystem engineered to centralize and orchestrate logical configuration, identity lifecycle management, infrastructure resource provisioning, and AI model deployment across multi-region data centers (`slo`, `prg`, `nyc`).
 
-Operating as an autonomous, fully functional application on port `50105`, CMU provides engineers and operators with an interactive Click CLI for infrastructure manipulation and validation. Concurrently, it serves as the core infrastructure and configuration backend engine powering the **Sera Admin Module (SAM)** web interface. Within the ecosystem's administrative utility suite (AMU, CMU, DIU, HMU, OMU), CMU isolates API-driven and SSH/SFTP-orchestrated control-plane lifecycles away from application runtimes into a unified administrative gateway.
+Operating as an autonomous, standalone control plane, CMU provides engineers and operators with an interactive Click CLI for infrastructure manipulation and validation. Concurrently, it serves as the core infrastructure and configuration backend engine powering the **Sera Admin Module (SAM)** web interface. CMU establishes a secure administrative boundary, isolating high-privilege API-driven and SSH/SFTP-orchestrated control-plane lifecycles away from user applications into an audited control plane.
 
-CMU governs end-to-end resource provisioning—spanning Keycloak OIDC identities, HAProxy native API keys (`sk_aif_`) and load balancer configurations, HashiCorp Vault KV v2 secrets and IAM policies, Patroni PostgreSQL databases, Valkey/Redis cache clusters, Active Directory GSS-TSIG DNS records, Kubernetes PVC storage management, and vLLM/NIM AI model & LoRA weight rollouts.
+CMU persists its state and audit metrics in HA PostgreSQL (`sam_admin_prod_db`) and coordinates directly with HashiCorp Vault, Keycloak, HAProxy, Patroni PostgreSQL, Valkey, Active Directory DNS, Rancher, and GitLab.
+
+Its primary operational capabilities include:
+- **Identity & Access Governance:** End-to-end provisioning of Keycloak OIDC confidential clients, client credentials, and HAProxy native API keys (`sk_aif_`) across multi-region load balancers.
+- **Database & Storage Provisioning:** Automated Day-1 creation, table ownership repair, and safe teardown of Patroni PostgreSQL databases and roles, with automatic Vault DSN injection.
+- **Global Cache & Valkey Orchestration:** Multi-region 9-node Valkey user ACL generation, dual DB index reservation tagging (`__GIA_DB_OWNER__`), and pre-provisioning validation of free DB indices on local Redis.
+- **Infrastructure Secrets & IAM Auditing:** Centralized HashiCorp Vault KV v2 CRUD operations, recursive key trees, AppRole policy inspection, and autonomous background scraping of Vault leader audit logs.
+- **AI Model & LoRA Deployment:** Declarative manifest and Kustomize overlay rollouts to Rancher GPU clusters, sequential compute deployment with GPU VRAM clearing, real-time vLLM startup milestone log tracking, and ephemeral pod tarball streaming for LoRA adapter weights.
+- **Declarative GitOps & Drift Verification:** Continuous drift detection comparing GitLab repository manifests against live Kubernetes workloads in `sera-llm` to ensure declarative infrastructure parity (focusing on declarative manifest drift, while physical hardware and VRAM consumption are monitored by HMU).
+- **Active Directory DNS & Storage Expansion:** GSS-TSIG Kerberos dynamic DNS updates (`nsupdate`) and Prometheus-driven Kubernetes PVC volume auto-expansion.
 
 ---
 
 ## 2. Architecture & Ecosystem Integration 🏗️
 
-CMU operates on a client-server architecture, exposing dual gRPC servicers on port `50105` (`cmu-grpc.service`) backed by a multi-worker thread pool, while providing operators with a standalone Click CLI and autonomous background audit monitors.
+CMU operates on a client-server architecture, exposing dual gRPC servicers backed by a multi-worker thread pool (`cmu-grpc.service`), while providing operators with a standalone Click CLI and autonomous background audit monitors.
 
 ### 2.1. Dual Servicer & Core Architectural Principles
 - **Dual Servicer Model:**
   1. **`CmuService` (`cmu.proto`):** Domain control-plane router delegating execution across specialized backend managers for Vault, Keycloak, HAProxy, PostgreSQL, Valkey, Active Directory DNS, Rancher/Kubernetes, and vLLM/NIM model deployment.
-  2. **`SeraAppService` (`sera_standard.proto`):** Implements the universal SERA ecosystem contract (`v1.2-universal`, maintained centrally by AMU) for self-reporting CMU's metadata, deep health matrix, documentation, and changelog.
+  2. **`SeraAppService` (`sera_standard.proto`):** Implements the universal SERA ecosystem standard contract (maintained centrally by AMU) for self-reporting CMU's metadata, deep health matrix, documentation, and changelog.
 - **Headless Control-Plane Gateway:** Establishes a strict architectural boundary by isolating high-privilege infrastructure provisioning away from user applications and operator workstations into an audited, centralized service.
 - **Autonomous Standalone Operation:** Functions as a complete standalone system with direct SSH, API, and database orchestration, providing an interactive Click CLI equipped with safety confirmation prompts (`click.confirm`) for destructive actions.
 - **SAM Infrastructure Backend:** Powers the infrastructure provisioning, credential inspection, and GPU model rollout workflows within the **Sera Admin Module (SAM)** UI.
 - **Manager-Delegated Architecture:** The gRPC servicer layer acts as a lightweight router that initializes singleton domain managers at startup, maintaining cached client pools for SSH (Paramiko), Kubernetes, and HashiCorp Vault.
+- **High-Availability Persistence Isolation:** Utilizes split read/write SQLAlchemy connection pools (`write_dsn` on `:5432` and `read_dsn` on `:5433`) with `pool_pre_ping=True` and connection-hold prevention.
 - **Dynamic Call Tracing & Background Auditing:** Automatically intercepts and logs `x-client-id` metadata headers (`[SAM]`, `[CLI]`, `[ORCH]`) across all RPCs while running hourly background daemons (`VaultAuditMonitor`, `HAProxyAuditMonitor`) that aggregate usage metrics into PostgreSQL.
 
 ### 2.2. Ecosystem Integration & Data Flow
@@ -43,12 +53,13 @@ graph TD
         SAM["Sera Admin Module (SAM UI)"]
         CLI["CMU Click CLI (cmu_cli.py)"]
         ORCH["GIA Orchestrator / Peers"]
+        AMU["Application Management Utility (AMU)"]
     end
 
     subgraph CMU_Core ["Configuration Management Utility (CMU :50105)"]
         GRPC["gRPC Server (10 Workers)"]
         CMU_SVC["CmuServiceServicer"]
-        SERA_SVC["SeraStandardServiceImpl (v1.2)"]
+        SERA_SVC["SeraStandardServiceImpl"]
         MON_V["VaultAuditMonitor (60m Daemon)"]
         MON_H["HAProxyAuditMonitor (60m Daemon)"]
         
@@ -80,6 +91,7 @@ graph TD
     CLI -->|gRPC + x-client-id| GRPC
     SAM -->|gRPC + x-client-id| GRPC
     ORCH -->|gRPC + x-client-id| GRPC
+    AMU -->|GetAppInfo / GetDeepHealth| GRPC
 
     GRPC --> CMU_SVC
     GRPC --> SERA_SVC
@@ -377,7 +389,7 @@ CMU exposes two gRPC services on port `50105`, along with standard gRPC Health C
 *Note: `DbFixOwnershipRequest` and `DbFixOwnershipResponse` messages are defined in `cmu.proto` and implemented in `CmuServiceServicer.DbFixOwnership`, though the `rpc DbFixOwnership` line is currently omitted from the `service CmuService` block in `cmu.proto`.*
 
 ### 8.2. `SeraAppService` Standard Contract (`sera_standard_service.py`)
-CMU implements the universal SERA standard contract (`sera.standard.v1.SeraAppService` - `v1.2-universal`), centrally maintained and deployed by the Application Management Utility (AMU). It provides standardized endpoints (`GetAppInfo`, `GetDeepHealth`, `GetFeedback`, `GetChangelog`, `GetDocs`) enabling AMU and the SAM UI to self-discover CMU's metadata, deep TCP socket dependency health matrix, changelog history, and design documentation without requiring custom integration logic.
+CMU implements the universal SERA standard contract (`sera.standard.v1.SeraAppService`), centrally maintained and deployed by the Application Management Utility (AMU). It provides standardized endpoints (`GetAppInfo`, `GetDeepHealth`, `GetFeedback`, `GetChangelog`, `GetDocs`) enabling AMU and the SAM UI to self-discover CMU's metadata, deep TCP socket dependency health matrix, changelog history, and design documentation without requiring custom integration logic.
 
 ---
 
