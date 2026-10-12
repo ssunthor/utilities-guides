@@ -1,6 +1,6 @@
-# Health Monitor Utility (HMU) - Architecture Document
+# Health Monitor Utility (HMU) - Architecture & Design Document
 
-**Doc_Type:** Architecture
+**Doc_Type:** Architecture & Design
 **Category:** (U) Utility
 **Name:** Health Monitor Utility
 **Acronym:** HMU

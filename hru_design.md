@@ -1,6 +1,6 @@
 # HALO Repository Utility (HRU) - Architecture & Design Document
 
-**Doc_Type:** Architecture
+**Doc_Type:** Architecture & Design
 **Category:** (U) Utility
 **Name:** HALO Repository Utility
 **Acronym:** HRU

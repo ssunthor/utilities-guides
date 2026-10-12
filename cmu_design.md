@@ -1,6 +1,6 @@
-# Configuration Management Utility (CMU) - Architecture Document
+# Configuration Management Utility (CMU) - Architecture & Design Document
 
-**Doc_Type:** Architecture
+**Doc_Type:** Architecture & Design
 **Category:** (U) Utility
 **Name:** Configuration Management Utility
 **Acronym:** CMU
@@ -429,6 +429,8 @@ CMU spawns two autonomous daemon threads upon gRPC server initialization (`CmuSe
 
 All CLI commands support `--grpc` (where applicable) to output raw protobuf responses formatted as JSON via `print_grpc_json()`.
 
+### 11.1. CLI Command Reference
+
 | Command Group | Subcommands & Key Options | Operational Description |
 | :--- | :--- | :--- |
 | **Root (`cli`)** | `start-grpc-server`<br/>`init-db [--force]` | Starts the CMU gRPC server on port `50105`.<br/>Initializes (or wipes and recreates with `--force`) PostgreSQL tables. |
@@ -445,6 +447,47 @@ All CLI commands support `--grpc` (where applicable) to output raw protobuf resp
 | **`app`** | `deploy --file-path <P> [--cluster slo] [--namespace default]`<br/>`verify --file-path <P> [--cluster all] [--namespace] [--show-live]` | Deploys or verifies standard application manifests from `aif_common`. |
 | **`volumes`** | `search <VOL_NAME> [--cluster]`<br/>`expand --cluster <C> --namespace <NS> --pvc-name <P> --size <S\|auto>`<br/>`scan [--cluster all] [--usage-threshold 90.0]` | Searches PVCs/PVs globally, expands PVC storage dynamically, and scans for high-utilization volumes via Prometheus. |
 | **`rancher`** | `rotate-tokens` | Rotates Rancher API tokens via local provider login across all regions and updates `secret/rancher/{loc}/system/gia_ai` in Vault. |
+
+### 11.2. CLI Quick Execution Examples
+
+```bash
+# Server & Database Lifecycle
+python3 configuration_management_utility.py start-grpc-server
+python3 configuration_management_utility.py init-db [--force]
+
+# SERA Standard Module Introspection
+python3 configuration_management_utility.py module info [--grpc]
+python3 configuration_management_utility.py module check-health [--grpc]
+
+# Secret Management (HashiCorp Vault)
+python3 configuration_management_utility.py secret list -p secret/syseng/ -r
+python3 configuration_management_utility.py secret get key -p secret/syseng/app
+python3 configuration_management_utility.py secret write secret/syseng/app FOO=bar
+python3 configuration_management_utility.py secret audit [query] [--raw]
+
+# Identity & Gateway API Keys (HAProxy / Keycloak)
+python3 configuration_management_utility.py identity list
+python3 configuration_management_utility.py identity create <client_id> --env prod --requestor sre --description "App key"
+python3 configuration_management_utility.py identity get-secret <client_id>
+python3 configuration_management_utility.py identity test <client_id>
+python3 configuration_management_utility.py identity audit <client_id>
+
+# Infrastructure Fleet & Datacenter Operations
+python3 configuration_management_utility.py haproxy sync [--grpc]
+python3 configuration_management_utility.py haproxy apply --location slo
+python3 configuration_management_utility.py db list -t all
+python3 configuration_management_utility.py cache inspect
+python3 configuration_management_utility.py dns list <zone>
+python3 configuration_management_utility.py git sync --domain aif_models
+
+# AI Model Deployments & LoRA Adapters
+python3 configuration_management_utility.py models list --location slo
+python3 configuration_management_utility.py models deploy --model google/gemma-4-31B-it --cluster all --tier gpu3 --verify
+python3 configuration_management_utility.py lora list --model google/gemma-4-31B-it --location all
+python3 configuration_management_utility.py volumes scan --cluster all --usage-threshold 90.0
+python3 configuration_management_utility.py rancher rotate-tokens
+```
+
 
 ---
 

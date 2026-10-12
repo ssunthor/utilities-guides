@@ -1,6 +1,6 @@
-# Application Management Utility (AMU) - Architecture Document
+# Application Management Utility (AMU) - Architecture & Design Document
 
-**Doc_Type:** Architecture
+**Doc_Type:** Architecture & Design
 **Category:** (U) Utility
 **Name:** Application Management Utility
 **Acronym:** AMU
@@ -380,6 +380,8 @@ Implemented by `SeraStandardServiceImpl` (master reference implementation):
 
 AMU provides a rich administrative CLI via `python3 application_management_utility.py <group> <command>`:
 
+### 11.1. CLI Command Reference
+
 | Command Group | Command & Arguments | Operational Purpose |
 | :--- | :--- | :--- |
 | **Root** | `start-grpc-server` | Compiles protos if needed, initializes DB tables, and starts the gRPC server on `:50102`. |
@@ -409,6 +411,40 @@ AMU provides a rich administrative CLI via `python3 application_management_utili
 | **`git`** | `git rollback <acronym> [--commit HASH]` | Rolls back an app to a previous commit (interactive prompt if `--commit` is omitted). |
 | **`git`** | `git sync [--acronym X] [--message "..."] [--dry-run] [--minor-only] [--debug] [--author "..."]` | Runs the streaming LLM `SmartSyncAppChanges` workflow across one or all managed local apps. |
 | **`git`** | `git sync-docs` | Iterates over all git repositories inside `/ai/assets/guides`, committing and pushing pending changes with message `"Guides Sync"`. |
+
+### 11.2. CLI Quick Execution Examples
+
+```bash
+# Server & Database Lifecycle
+python3 application_management_utility.py start-grpc-server
+python3 application_management_utility.py init-db [--force]
+
+# SERA Standard Module Introspection
+python3 application_management_utility.py module info [--grpc]
+python3 application_management_utility.py module check-health [--grpc]
+
+# Application Registry & Topology
+python3 application_management_utility.py registry list
+python3 application_management_utility.py registry deps [--grpc]
+python3 application_management_utility.py registry register --auto
+python3 application_management_utility.py info list-apps [--grpc]
+python3 application_management_utility.py info ports [--grpc]
+
+# Health & Release Auditing
+python3 application_management_utility.py health get-all [--grpc]
+python3 application_management_utility.py health get <acronym> [--grpc]
+python3 application_management_utility.py releases summary [--grpc]
+python3 application_management_utility.py audit llms
+python3 application_management_utility.py audit infra
+
+# GitOps & Ecosystem Synchronization
+python3 application_management_utility.py git status <acronym> [--grpc]
+python3 application_management_utility.py git commit <acronym> -m "Conventional commit message"
+python3 application_management_utility.py git sync [--acronym <acronym>]
+python3 application_management_utility.py git rollback <acronym>
+python3 application_management_utility.py deploy push-std <acronym>
+```
+
 
 ---
 

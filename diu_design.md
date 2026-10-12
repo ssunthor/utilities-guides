@@ -1,6 +1,6 @@
-# Data Inspector Utility (DIU) - Architecture Document
+# Data Inspector Utility (DIU) - Architecture & Design Document
 
-**Doc_Type:** Architecture
+**Doc_Type:** Architecture & Design
 **Category:** (U) Utility
 **Name:** Data Inspector Utility
 **Acronym:** DIU
@@ -321,9 +321,33 @@ The DIU CLI (`cli/diu_cli.py`) uses a custom `NestedHelpGroup` to display all to
 | `sqna search` | `[query='all'] [--space] [--grpc]` | Searches multi-page Synthesized Q&A records by ID, question text, or space key. |
 | `debug store` | `<page_id> [--output 'page_dump.json']` | Fetches all details for a page (`limit_chunks=10000`) and writes formatted JSON to disk. |
 
-### 11.2. Standalone Tooling
-- **`core/schema_generator.py`:** Can be executed directly (`python3 core/schema_generator.py`) to regenerate `core/database/schemas.py` from `confluence_ingestor` ORM models.
-- **`core/test_diu.py`:** Standalone async diagnostic script utilizing `DIUClient` to inspect structured table keys and markdown samples.
+### 11.2. CLI Quick Execution Examples
+
+```bash
+# Server Lifecycle & Standard Introspection
+python3 data_inspector_utility.py start-grpc-server
+python3 data_inspector_utility.py module info [--grpc]
+python3 data_inspector_utility.py module check-health [--grpc]
+
+# Confluence Space & Hierarchy Inspection
+python3 data_inspector_utility.py stats show [--grpc]
+python3 data_inspector_utility.py spaces list [--grpc]
+python3 data_inspector_utility.py spaces hierarchy <space_key> [--grpc]
+python3 data_inspector_utility.py spaces directory <space_key> [--grpc]
+
+# Page Content & Semantic Chunk Retrieval
+python3 data_inspector_utility.py pages list <space_key> [--limit 50] [--grpc]
+python3 data_inspector_utility.py pages get <page_id> [--limit-chunks 10] [--grpc]
+python3 data_inspector_utility.py pages search --title "LLM" [--search-text] [--grpc]
+
+# Structured Tables & Synthesized Q&A
+python3 data_inspector_utility.py tables show <table_id> [--grpc]
+python3 data_inspector_utility.py sqna search --space <space_key> [--grpc]
+python3 data_inspector_utility.py debug store <page_id> --output page_dump.json
+```
+
+### 11.3. Standalone Developer Tooling
+- **`core/schema_generator.py`:** Regenerates Pydantic DTOs in `core/database/schemas.py` directly from external `confluence_ingestor` SQLAlchemy ORM models. While executed automatically by `data_inspector_utility.py start-grpc-server` during pre-flight initialization, developers can run it manually via `python3 core/schema_generator.py` whenever upstream ingestor database models are updated.
 
 ---
 

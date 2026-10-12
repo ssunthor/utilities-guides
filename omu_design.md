@@ -1,6 +1,6 @@
-# Operations Management Utility (OMU) - Architecture Document
+# Operations Management Utility (OMU) - Architecture & Design Document
 
-**Doc_Type:** Architecture
+**Doc_Type:** Architecture & Design
 **Category:** (U) Utility
 **Name:** Operations Management Utility
 **Acronym:** OMU
