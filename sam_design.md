@@ -4,8 +4,8 @@
 **Category:** (AM) Admin Module  
 **Name:** Sera Admin Module  
 **Acronym:** SAM  
-**Version:** 0.7.1  
-**Date:** 2026-10-12  
+**Version:** 0.7.2  
+**Date:** 2026-10-22  
 **Author:** Martin Kecka & Gemini AI  
 **Status:** Active  
 
@@ -15,7 +15,7 @@
 
 The **Sera Admin Module (SAM)** is the centralized, modular platform for monitoring, debugging, managing, and operating the entire SERA/GIA AI ecosystem across Prague, Slough, and New York data centers.
 
-The primary goal of SAM is to replace disparate administrative tools with a single, unified, and secure "single pane of glass" interface. It enables developers, Site Reliability Engineers (SREs), and platform administrators to observe real-time hardware and inference engine telemetry, autonomously diagnose infrastructure anomalies using LLM reasoning, manage application lifecycles via GitOps, inspect knowledge base vectorizations, and govern ecosystem identities and secrets.
+The primary goal of SAM is to replace disparate administrative tools with a single, unified, and secure "single pane of glass" interface. It enables developers, Site Reliability Engineers (SREs), and platform administrators to observe real-time hardware and inference engine telemetry, autonomously diagnose infrastructure anomalies using LLM reasoning, manage application lifecycles via GitOps, inspect knowledge base vectorizations, and govern ecosystem identities, secrets, AI model deployments, and LoRA adapters.
 
 SAM operates on a **Backend-for-Frontend (BFF) / Aggregator** pattern:
 1. **`SAM-WebUI` (React/Vite):** The graphical user interface providing multi-domain operational dashboards.
@@ -27,7 +27,7 @@ Its primary operational capabilities include:
 - **Autonomous SRE Reasoning & Incident Triage:** Continuous 60s rule evaluation using a dedicated Gemma-4-31B cognitive engine to deduce root causes and prescribe actionable remediation for hardware faults, traffic saturation, zombie models, and pod degradation.
 - **Application Portfolio & GitOps Orchestration:** Authoritative ecosystem registry, multi-service dependency mapping, unified changelog tracking, and automated GitOps commit/rollback workflows via AMU.
 - **Fleet-Wide Stateful Infrastructure Introspection:** Real-time cluster health, kernel auditing, and pending OS update tracking across Patroni, Valkey, Kafka, Qdrant, DCS/etcd, Vault, and Kubernetes via OMU.
-- **Identity Lifecycle & Secrets Governance:** Streamlined provisioning and auditing of Keycloak OIDC confidential clients and native HAProxy API keys with HashiCorp Vault KV v2 secret synchronization via CMU.
+- **Identity Lifecycle, AI Model & LoRA Governance:** Streamlined provisioning and auditing of Keycloak OIDC confidential clients and native HAProxy API keys (paired with 24h client prompt inspection and monthly-grouped daily usage audits), alongside declarative multi-cluster AI model deployment, GitLab vs. Kubernetes drift verification, Kustomize GPU overlay editing, and LoRA adapter repository/rollout orchestration via CMU.
 - **Knowledge Base & RAG Pipeline Quality Assurance:** Deep hierarchical space browsing, chunk boundary inspection, synthesized Q&A analysis, and vector store validation via DIU.
 - **Combinatorial Endpoint Benchmarking & ROI Cost Tracking:** Automated load testing across concurrency steps and financial token usage analytics against commercial frontier models (GPT-5, Claude Opus, Gemini Pro).
 
@@ -42,7 +42,7 @@ SAM sits behind the **GIA Gateway** (which handles authentication and injects id
 2. **Decoupled Asynchronous Polling & Event Loop Protection:** All blocking gRPC connector calls are offloaded via `asyncio.to_thread()`, and heavy telemetry sweeps run in isolated background daemons (`telemetry_daemon`, `gitops_daemon`, `topology_daemon`) to prevent starvation of the FastAPI event loop.
 3. **Multi-Database Valkey Caching & Distributed Locks:** Leverages dual Valkey DBs (DB 16 for UI cache and leader locks; DB 17 for auxiliary data) with strict TTLs, leader election (`NX=True`), and lock refreshing on error to eliminate thundering-herd spikes on downstream nodes.
 4. **Autonomous SRE Intelligence (Gemma-4-31B):** Continually correlates multi-source signals (DCGM GPU errors vs. live HTTP 200 inference checks, HAProxy routes vs. K8s pods) using a local LLM reasoning engine operating at low temperature (`0.2`) with chain-of-thought extraction.
-5. **Zero-Trust Security & Granular RBAC Isolation:** Relies on GIA Gateway header injection (`x-forwarded-user`, `x-forwarded-groups`), enforces strict role-based permission gates (`can_manage_cmu_secrets`, `can_delete_events`, `can_push_amu`, `can_run_benchmarks`), and automatically strips credentials from DSNs and Vault client configs before UI caching.
+5. **Zero-Trust Security & Granular RBAC Isolation:** Relies on GIA Gateway header injection (`x-forwarded-user`, `x-forwarded-groups`), enforces strict role-based permission gates (`can_manage_cmu_secrets`, `can_manage_cmu_models`, `can_manage_cmu_lora`, `can_delete_events`, `can_push_amu`, `can_run_benchmarks`), and automatically strips credentials from DSNs and Vault client configs before UI caching.
 6. **Universal Ecosystem Standard Compliance (`sera_standard.proto`):** Exposes `SeraAppService` on port `50103` (maintained centrally by AMU) for ecosystem discovery, TCP socket dependency health reporting, and documentation aggregation.
 
 ### 2.2. Ecosystem Integration & Data Flow
@@ -122,7 +122,7 @@ graph TD
 - **HMU (Health Monitor Utility - Port `50101`):** Interfaces with Rancher Kubernetes APIs, Prometheus TSDB, vLLM, and NVIDIA Triton Inference Servers to provide physical GPU/OS telemetry, 3-layer routing checks (F5, VM HAProxy, Kube HAProxy), combinatorial load-testing benchmarks, and token/prompt payload analytics.
 - **AMU (Application Management Utility - Port `50102`):** Manages the Application Registry via the `sera_standard.proto` contract. Performs deep health aggregation, dependency boundary mapping, changelog unification, GitOps repository management, and AI Act compliance inventory tracking.
 - **OMU (Operation Management Utility - Port `50104`):** Performs stateful fleet introspection across core infrastructure clusters (Patroni/PostgreSQL, Qdrant, HAProxy/Keepalived, DCS Consul/Etcd, Valkey, Kafka, Vault, Keycloak, Rancher/K8s, and Generic nodes) alongside OS kernel and APT package auditing.
-- **CMU (Configuration Management Utility - Port `50105`):** Manages enterprise authentication identities across Keycloak (`aif-llm` realm) and native HAProxy API keys, coordinating secret storage in HashiCorp Vault and auditing daily request vs. ping volumes.
+- **CMU (Configuration Management Utility - Port `50105`):** Manages enterprise authentication identities across Keycloak (`aif-llm` realm) and native HAProxy API keys, coordinates secret storage in HashiCorp Vault, audits daily request vs. ping volumes, and orchestrates multi-cluster vLLM/NIM model deployments, GitLab manifest/Kustomize overlay editing, drift verification, and LoRA adapter weight distribution.
 - **DIU (Data Inspector Utility - Port `50109`):** Queries the SERA semantic knowledge base to expose Confluence space hierarchies, document chunk boundaries, HyDE generated questions, multi-pass summaries, vision metadata, and structured tables.
 
 ---
@@ -190,7 +190,7 @@ graph TD
 │   └── routers/
 │       ├── amu.py                                           # Endpoints for topology, changelogs, GitOps rollback, and agent inventory
 │       ├── benchmarks.py                                    # Background thread execution and safety checks for load testing
-│       ├── cmu.py                                           # Endpoints for Keycloak/HAProxy identities, Vault secrets, and audits
+│       ├── cmu.py                                           # Endpoints for Keycloak/HAProxy identities, Vault secrets, AI models, and LoRA
 │       ├── diagnostics.py                                   # Endpoints for active incidents and manual AI re-analysis
 │       ├── diu.py                                           # Internal endpoints for Confluence spaces, directory trees, and chunks
 │       ├── docs.py                                          # Endpoints for ecosystem design docs and zip changelog downloads
@@ -221,7 +221,7 @@ graph TD
 │       │   └── hmuConstants.js                              # Ephemeral pod keys excluded from config drift detection
 │       ├── features/
 │       │   ├── amu/                                         # AMU UI components (Topology, Releases, Agent Inventory) and dialogs
-│       │   ├── cmu/                                         # CMU UI components (Identity Manager) and Keycloak/HAProxy dialogs
+│       │   ├── cmu/                                         # CMU UI components (IdentityManagerWidget, LoraManagerWidget) and Identity/Model/LoRA dialogs
 │       │   ├── diu/                                         # DIU UI components (Knowledge Tree, Reading/Investigation views, Stats)
 │       │   ├── documentation/                               # Documentation accordion and unified ChangelogViewer
 │       │   ├── hmu/                                         # HMU UI components (Engines, Topology, Traffic, Events, Benchmarks, Cost, Prompts) and dialogs
@@ -256,6 +256,7 @@ For long-running operational workflows, SAM bypasses standard request-response b
 2. **Multi-Environment Identity Provisioning (`POST /api/cmu/identity`):** Streams real-time progress chunks as CMU creates Keycloak OIDC clients and HAProxy native API keys sequentially across `dev`, `test`, `stag`, and `prod` clusters.
 3. **Identity Teardown (`DELETE /api/cmu/identity/{client_id}`):** Streams sequential revocation and secret deletion progress across environments.
 4. **Combinatorial Load Benchmarks (`POST /api/benchmarks/run`):** Spawns an isolated background thread streaming live concurrency step progression, TPS, latency quantiles, and delayed post-test infrastructure snapshots directly to the frontend `BenchmarkStreamDialog`.
+5. **Valkey-Backed Model & LoRA Background Task Orchestrator (`spawn_lora_background_task` in `rest_api/routers/cmu.py`):** When an operator initiates a model rollout (`POST /api/cmu/models/deploy`) or LoRA operation (`POST /api/cmu/lora/upload`, `/deploy`, `/upload-archive`, `/disable`), SAM acquires a per-model distributed mutex lock in Valkey (`CMU_LORA_TASK_LOCK` / `sam:lock:cmu:lora_task:{model}`) so concurrent operations on the same base model are rejected with `HTTP 409 Conflict` regardless of target cluster. A background daemon thread consumes CMU's gRPC server stream and continuously updates shared task state (`CMU_LORA_TASK_STATE` / `sam:cmu:lora:tasks:active`), allowing operators to close and reopen the live console dialog at any time while broadcasting active operation banners to all connected SAM users.
 
 ---
 
@@ -298,8 +299,8 @@ When an operator initiates a benchmark via `POST /api/benchmarks/run`:
 ### 5.4. HITL & Operator Override Workflows
 - **Fast Verify & Resolve (`POST /api/events/timeline/{incident_id}/verify-resolve`):** Operators can manually resolve an `ACTIVE` incident before its 60-minute cooldown expires (e.g., after restarting a DCGM exporter pod to clear a cached XID error). SAM enforces a strict 120-second guard: if `(now - last_seen_at).total_seconds() < 120`, the request is rejected with `HTTP 409 Conflict`, instructing the operator to wait up to 2 minutes for the 60s telemetry daemon cache to clear and prove the anomaly is truly gone.
 - **Force AI Re-Analysis (`POST /api/diagnostics/analyze`):** Operators can click "Reanalyze" on any alarm (or "Force AI Analysis on Snapshot" on informational events) with `force_reanalyze=True` to bypass cached analyses and re-run the LLM against the stored context snapshot.
-- **GitOps Auto-Sync Holdoff & Manual Commit (`POST /api/amu/apps/{acronym}/push`):** For applications with `is_managed=True`, `GitOpsService.auto_sync_app()` checks `last_modified_uncommitted_timestamp`. If uncommitted files were modified less than 3600 seconds (1 hour) ago, auto-push is skipped to prevent committing while a developer is actively editing code. Additionally, if the top changelog version tag (e.g., `[v0.7.1]`) is already present in `latest_commit_message`, auto-push is skipped to prevent duplicate commits. Operators with `can_push_amu` permissions can trigger an immediate manual push or rollback via the UI.
-- **Identity & Secret Administration Overrides (`can_manage_cmu_secrets`):** Viewing client secrets (`GET /api/cmu/identity/{client_id}/secret`) and executing Day-1 provisioning or teardown requires the administrative RBAC claim. Non-admin users are restricted to viewing sanitized Vault metadata (Requestor, Environment, Description) without raw credential exposure.
+- **GitOps Auto-Sync Holdoff & Manual Commit (`POST /api/amu/apps/{acronym}/push`):** For applications with `is_managed=True`, `GitOpsService.auto_sync_app()` checks `last_modified_uncommitted_timestamp`. If uncommitted files were modified less than 3600 seconds (1 hour) ago, auto-push is skipped to prevent committing while a developer is actively editing code. Additionally, if the top changelog version tag (e.g., `[v0.7.2]`) is already present in `latest_commit_message`, auto-push is skipped to prevent duplicate commits. Operators with `can_push_amu` permissions can trigger an immediate manual push or rollback via the UI.
+- **Identity, Secret, Model & LoRA Administration Overrides (`can_manage_cmu_secrets`, `can_manage_cmu_models`, `can_manage_cmu_lora`):** Viewing client secrets (`GET /api/cmu/identity/{client_id}/secret`), executing Day-1 identity provisioning/teardown, editing GitLab model manifests/Kustomize overlays (`PUT /api/cmu/models/{model_name}/manifests`), rolling out models (`POST /api/cmu/models/deploy`), and uploading/deploying/disabling LoRA adapters require the administrative RBAC claims. Non-admin users are restricted to read-only inspection of sanitized Vault metadata, model topology, drift verification, and LoRA inventory.
 - **Selective App Health & Portfolio Sync (`POST /api/amu/health/{acronym}/refresh`):** Operators can manually trigger deep health re-evaluation for a single service, which immediately evicts and refreshes the targeted app in `AMU_TOPOLOGY_HEALTH` cache without waiting for the full ecosystem poll cycle.
 
 ---
@@ -351,6 +352,12 @@ All caching and distributed mutex locks are strictly typed via `CacheRegistry` i
 | :--- | :--- | :--- | :--- |
 | `CMU_IDENTITY_AUDIT` | `sam:cmu:identity:audit:all` | 604800 (7d) | Global identity usage audit (refreshed every 15m by daemon) |
 | `CMU_VAULT_INFO` | `sam:cmu:vault:info:all` | 604800 (7d) | Sanitized Vault metadata (requestor, environment, description) |
+| `CMU_LORA_LIST` | `sam:cmu:lora:list:{model}:{location}` | 300 (5m) | Cached LoRA inventory across local repo and cluster PVCs |
+| `CMU_MODELS_LIST` | `sam:cmu:models:list` | 600 (10m) | Discovered AI models and logical names |
+| `CMU_MODELS_INVENTORY` | `sam:cmu:models:inventory:{model}:{location}` | 300 (5m) | Detailed K8s model topology (`Deployments`, `Active Pods`, `Services`, `PVCs`, `Ingresses`) |
+| `CMU_MODELS_VERIFY` | `sam:cmu:models:verify:{model}:{cluster}` | 300 (5m) | Cached GitLab vs. live Kubernetes manifest drift verification |
+| `CMU_LORA_TASK_STATE` | `sam:cmu:lora:tasks:active` | 86400 (24h) | Shared active & recent Model/LoRA background task state and log lines |
+| `CMU_LORA_TASK_LOCK` | `sam:lock:cmu:lora_task:{model}` | 3600 (1h) | Distributed per-model mutex preventing concurrent Model/LoRA operations |
 | `HMU_CLUSTER_MAP` | `sam:hmu:topology:cluster_map` | 3600 (1h) | Physical node and GPU topology map |
 | `HMU_VLLM_STATUS` | `sam:hmu:vllm:status` | 120 (2m) | Live vLLM instance metrics |
 | `HMU_HALO_STATUS` | `sam:hmu:halo:status` | 120 (2m) | Live Triton / Halo instance metrics |
@@ -385,7 +392,7 @@ All caching and distributed mutex locks are strictly typed via `CacheRegistry` i
 ### 7.3. Audit Trails & Privilege Logging
 - **Incident Lifecycle Auditing:** Every anomaly recorded in `incidents` is uniquely fingerprinted (`fingerprint`), timestamped (`created_at`, `last_seen_at`, `resolved_at`), and correlated with a strict JSON `history_timeline` snapshot. If AI analysis was performed, the immutable reasoning trace and generated prompt are preserved in `incident_analyses`.
 - **Benchmark Run Provenance:** Every stress run committed to `benchmark_records` records full parameter matrices (`raw_matrix_json`), pre-test and delayed post-test infrastructure states, peak TPS, and soft-delete audit flags (`is_valid`).
-- **Administrative Operation Accountability:** User identities extracted from GIA Gateway headers (`x-forwarded-user`, `x-forwarded-display-name`) are checked against RBAC permission matrices and logged across mutating REST endpoints (`/api/events/timeline/{id}/verify-resolve`, `/api/cmu/identity`, `/api/amu/apps/{acronym}/push`).
+- **Administrative Operation Accountability:** User identities extracted from GIA Gateway headers (`x-forwarded-user`, `x-forwarded-display-name`) are checked against RBAC permission matrices and logged across mutating REST endpoints (`/api/events/timeline/{id}/verify-resolve`, `/api/cmu/identity`, `/api/cmu/models/*`, `/api/cmu/lora/*`, `/api/amu/apps/{acronym}/push`).
 
 ---
 
@@ -415,9 +422,16 @@ Implements the universal SERA ecosystem standard contract (`sera.standard.v1.Ser
   - `GET /inventory`: Supports filtering by `group` and `strategy`, merging partial refreshes into global cache via `CacheService.merge_omu_inventory()`.
   - `GET /introspect/{component}`, `GET /audit/runs`, `GET /audit/logs/{run_id}`.
 - **CMU (`/api/cmu`):**
-  - `GET /identity` (Keycloak), `GET /identity/haproxy` (HAProxy Vault keys), `GET /vault_info`.
-  - `POST /identity` & `DELETE /identity/{client_id}`: Streams NDJSON progress chunks (`application/x-ndjson`); requires `can_manage_cmu_secrets`.
-  - `GET /identity/{client_id}/config`, `PUT /identity/{client_id}/description`, `GET /identity/{client_id}/test`, `GET /identity/{client_id}/secret` (requires `can_manage_cmu_secrets`), `GET /identity/{client_id}/audit`.
+  - *Identity & Vault:*
+    - `GET /identity` (Keycloak), `GET /identity/haproxy` (HAProxy Vault keys), `GET /vault_info`.
+    - `POST /identity` & `DELETE /identity/{client_id}`: Streams NDJSON progress chunks (`application/x-ndjson`); requires `can_manage_cmu_secrets`.
+    - `GET /identity/{client_id}/config`, `PUT /identity/{client_id}/description`, `GET /identity/{client_id}/test`, `GET /identity/{client_id}/secret` (requires `can_manage_cmu_secrets`), `GET /identity/{client_id}/audit`.
+  - *AI Models & Manifests:*
+    - `GET /models`, `GET /models/inventory`, `GET /models/verify`.
+    - `POST /models/sync`, `POST /models/deploy` (Valkey background task with per-model lock), `GET /models/{model_name}/manifests`, `PUT /models/{model_name}/manifests` (updates YAML files, creates/deletes `overlays/deployment-<tier>` GPU overlays, commits & pushes to GitLab; requires `can_manage_cmu_models`).
+  - *LoRA Adapters & Task Orchestration:*
+    - `GET /lora` (aggregates `local`, `prg`, `slo`, `nyc`), `GET /lora/tasks`, `DELETE /lora/tasks/{model}`.
+    - `POST /lora/upload`, `POST /lora/deploy`, `POST /lora/upload-archive` (multipart `.zip`/`.tar.gz` upload), `POST /lora/disable` (requires `can_manage_cmu_lora`).
 - **DIU (`/api/diu` & `/api/external/diu`):**
   - *Internal:* `GET /spaces`, `GET /stats`, `GET /spaces/{space_key}/pages`, `GET /spaces/{space_key}/directory`, `GET /pages/search`, `GET /pages/{page_id}`, `GET /assets/{file_path:path}`.
   - *External HATEOAS API (`/api/external/diu`):* Exposes `GET /spaces`, `GET /spaces/{space_key}/pages`, `GET /spaces/{space_key}/hierarchy`, `GET /pages/search`, `GET /pages/{page_id}`, `GET /tables/{table_id}`, plus custom Swagger UI (`/docs`) and OpenAPI schema (`/openapi.json`) dynamically rewritten for external gateway proxy paths (`https://{host}/api/sam/diu`).
@@ -447,7 +461,7 @@ The `SAM-WebUI` is a React 18 SPA built with Vite, Material-UI (MUI v5), TanStac
    - **Events & Rules (`EventsWidget.jsx`):** Split view of Critical Alarms (AI Analyzed) and System Events (Informational) with `IncidentAnalysisDialog.jsx` (rendering Markdown analysis, internal LLM thinking reasoning, and raw prompts) and `EventTimelineDialog.jsx` (visualizing state-deduplicated timeline blocks anchored to true incident start/end times).
    - **Benchmarks (`BenchmarksWidget.jsx`):** Interactive load-testing launcher and historical leaderboard with `BenchmarkStreamDialog.jsx` for live terminal progress and cancellation.
    - **Cost & Usage (`UsageStatsWidget.jsx`):** Monthly and daily expandable token usage tables calculating hypothetical financial ROI against 6 commercial frontier models (`gpt-5.5-pro`, `claude-opus-4.7-fast`, `gpt-4o`, `gemini-3.1-pro`, `claude-4.6-sonnet`, `gemini-3.5-flash`) defined in `static/pricing.json`.
-   - **Prompt Explorer (`PromptExplorerWidget.jsx`):** 24h prompt analytics with summary KPIs (Total Prompts, Avg Tokens, Top Category by Volume/Avg Size/Total Load, Top Client) and server-side paginated filtering across `Model -> Client -> Category -> LoRA`. Clicking any row opens `PromptPayloadDialog.jsx` to inspect sampling parameters and raw prompt text.
+   - **Prompt Explorer (`PromptExplorerWidget.jsx`):** 24h prompt analytics with summary KPIs (Total Prompts, Avg Tokens, Top Category by Volume/Avg Size/Total Load, Top Client) and server-side paginated filtering across `Model -> Client -> Category -> LoRA` (initializing filters from URL query parameters such as `?tab=prompts&client=<clientId>`). Clicking any row opens `PromptPayloadDialog.jsx` to inspect sampling parameters and raw prompt text.
 2. **AMU (`AmuDashboard.jsx` - 3 Tabs):**
    - **Ecosystem Topology (`AmuTopologyWidget.jsx`):** Categorized table of registered microservices showing service health, reverse-mapped Consumers, Modules (gRPC connectors), Infra (Postgres, Valkey, Chroma/Qdrant), LLMs, Internal/External APIs, versions, ports, one-click GitOps Push, and `AmuAppDialog.jsx` (Changelog, out-of-date Docs detector, and GitOps commit history/rollback).
    - **Ecosystem Releases (`AmuReleasesWidget.jsx`):** Weekly paginated velocity tracker with category counters, application/author filters, and `[NEEDS_DOCS]` badge indicators.
@@ -455,9 +469,14 @@ The `SAM-WebUI` is a React 18 SPA built with Vite, Material-UI (MUI v5), TanStac
 3. **OMU (`OperationsDashboard.jsx`):**
    - Categorized accordions (*Databases*, *Brokers & Cache*, *Core Infrastructure*, *Kubernetes Clusters*, *Miscellaneous Workloads*) rendering specialized status cards (`PatroniCard`, `QdrantCard`, `KafkaCard`, `ValkeyCard`, `HaCard`, `DcsCard`, `VaultCard`, `KeycloakCard`, `K8sCard`, `GenericCard`).
    - Displays cluster health, kernel versions, pending kernel update warnings (`linux-image` / `linux-generic`), and stale inspection alerts (`> 48 hours`). Clicking any card opens `PatchingDetailsDialog.jsx` to inspect historical patching audit runs, raw terminal execution logs, pending APT packages, and Kubernetes pod phase breakdowns (`K8sPodsTab.jsx`).
-4. **CMU (`ConfigurationDashboard.jsx`):**
+4. **CMU (`ConfigurationDashboard.jsx` - 2 Tabs):**
    - **Identity Management (`IdentityManagerWidget.jsx`):** Dual sortable tables for HAProxy Native Keys and Keycloak Clients (`aif-llm` Realm) (filtering out non-service-account internal clients). Displays live status, Vault metadata (Env, Requestor, Description), Last Usage, and Total Usage.
-   - Includes `CreateIdentityDialog.jsx` (streaming NDJSON creation for `dev`, `test`, `stag`, `prod`), `HaproxyIdentityDetailsDialog.jsx`, and `KeycloakIdentityDetailsDialog.jsx` (secret reveal/copy, live Auth Retest, and daily audit logs split between Total Usage and passive health Pings).
+     - Includes `CreateIdentityDialog.jsx` (streaming NDJSON creation for `dev`, `test`, `stag`, `prod`), `HaproxyIdentityDetailsDialog.jsx`, and `KeycloakIdentityDetailsDialog.jsx`.
+     - Both identity details dialogs feature secret reveal/copy, live Auth Retest, a **Recent Prompts (24h)** section (displaying the latest 5 prompts for the client with click-to-inspect `PromptPayloadDialog.jsx` and header click navigation to `/hmu?tab=prompts&client=<clientId>`), and a **Daily Audits** table that displays the latest 7 active days directly while grouping older historical records into collapsible monthly summary rows inside a bounded scrollable container.
+   - **Models & LoRA (`LoraManagerWidget.jsx`, `ModelManifestsDialog.jsx`, `LoraUploadDialog.jsx`):**
+     - **Global Active & Recent Operations Banner:** Displays any running or recently finished Model/LoRA background operation across all connected SAM users, with per-model `Busy` badges, action lockouts, and a non-blocking wide (`lg`) live terminal console dialog that can be closed and reopened at any time.
+     - **Deployed AI Models & Cluster Topology:** Unified matrix across `PRG`, `SLO`, and `NYC` displaying `VLLM`/`NIM` engine badges, `Kustomize Overlays` vs. `Flat Manifests` layout indicators, per-tier deployment readiness chips (`gpu0: 2/2 Ready`), resource counts (`deploy • pods • svc • pvc`), live GitLab vs. Kubernetes drift verification (`Verify All Drift` and per-cluster Topology & Drift inspection modal), `ModelManifestsDialog.jsx` (allowing admins to edit YAML manifests, create/delete `overlays/deployment-<tier>` GPU overlays, toggle active tiers per cluster in `clusters/<loc>/kustomization.yaml`, and commit/push to GitLab), and rolling model deployment (`Deploy & Rollout`).
+     - **LoRA Adapter Repository & Cluster Topology:** Unified matrix across `LOCAL REPO` (`/ai/assets/lora_models`) and `PRG`/`SLO`/`NYC` clusters displaying `Stored`, `Applied`, `PVC Only`, or `Not Present` status alongside size and timestamps, supporting multipart `.zip`/`.tar.gz` archive upload, PVC synchronization without restart, full deployment with rollout, and per-cluster or global LoRA removal.
 5. **DIU (`DiuDashboard.jsx`):**
    - **Knowledge Tree Browser (`KnowledgeTreeBrowser.jsx`):** Collapsible left drawer navigating Confluence spaces or title search results, paired with `DIUStats.jsx` (landing page table of database content statistics across spaces).
    - **Dual inspection modes:** *Reading View* (`ReadingViewPanel.jsx` reconstructing full articles with auto-generated TOC, Markdown tables from `structured_tables_json`, and inline images/AI captions from `/api/diu/assets/`) and *Investigation View* (`InvestigationViewPanel.jsx` exposing document telemetry, multi-pass summaries, HyDE questions, synthesized multi-page Q&As, and per-chunk LLM analysis/VDB metadata).
@@ -476,6 +495,7 @@ SAM runs three decoupled asynchronous daemon loops in `rest_api/main.py` alongsi
 | **`gitops_daemon`** (`sync_gitops_task`) | Every 1800s / 30m (initial jitter 5.0-10.0s) | `sam:lock:daemon:gitops` (TTL=1800s) | Sweeps all registered apps via AMU, aggregates and sorts all changelogs into `AMU_ECOSYSTEM_CHANGELOGS`, and triggers `GitOpsService.auto_sync_app()` for apps with `is_managed=True`. |
 | **`topology_daemon`** (`sync_topology_task`) | Every 3600s / 60m (initial jitter 10.0-15.0s) | `sam:lock:daemon:topology` (TTL=3600s) | 1. Triggers `hmu.refresh_cluster_map()` and updates `HMU_CLUSTER_MAP`.<br>2. Refreshes `OMU_INVENTORY` (`omu.get_inventory_summary()`) if TTL < 3600s. |
 | **`execute_benchmark_background`** | On-demand via `POST /api/benchmarks/run` | In-memory cancellation flag (`active_benchmarks_cancel_flags[record_id]`) | Spawns a daemon `threading.Thread` that streams `hmu.run_benchmark_stream()`, throttles PostgreSQL DB progress commits to once per 1.0s, captures immediate post-test infra state, sleeps 45s for Prometheus alignment, and records delayed post-test infra state. |
+| **`spawn_lora_background_task`** | On-demand via `/api/cmu/models/deploy` & `/api/cmu/lora/*` | `sam:lock:cmu:lora_task:{model}` (TTL=3600s) | Acquires a per-model Valkey lock, spawns a daemon `threading.Thread` consuming CMU's streaming gRPC response, appends live log lines to `sam:cmu:lora:tasks:active` in Valkey, invalidates cached Model/LoRA inventory on completion, and releases the lock. |
 
 ---
 
@@ -530,7 +550,7 @@ python3 sera_admin_module.py benchmarks run-automated --host http://localhost:78
 
 | Section / Key | Purpose | Default / Production Value |
 | :--- | :--- | :--- |
-| `module_info.acronym` / `version` | Module identifier and semantic version | `"SAM"` / `"0.7.1"` |
+| `module_info.acronym` / `version` | Module identifier and semantic version | `"SAM"` / `"0.7.2"` |
 | `system_services.api.host` / `port` | FastAPI REST server bind address and port | `"0.0.0.0"` / `7890` (`sam-api.service`) |
 | `system_services.grpc.host` / `port` | SERA Standard gRPC bind address, port, and workers | `"0.0.0.0"` / `50103` / `10` (`sam-grpc.service`) |
 | `database.write_dsn` | PostgreSQL Primary HA write connection string | `postgresql://...@slo-aif-hadb.slo.gt-t.net:5432/sam_admin_prod_db` |
@@ -551,11 +571,13 @@ python3 sera_admin_module.py benchmarks run-automated --host http://localhost:78
 
 ### 12.2. Authentication, RBAC & Secret Sanitization
 - **Gateway Identity Injection (`rest_api/dependencies.py`):** SAM trusts upstream authentication performed by the GIA Gateway, extracting `x-forwarded-user`, `x-forwarded-display-name`, and comma-separated `x-forwarded-groups`.
-- **Role-Based Access Control (RBAC):** Users belonging to `GIA-Role-Admins` or `GIA-App-SAM-Admins` are granted `role = "admin"`, unlocking four granular permission flags enforced across both the React UI and FastAPI routers:
+- **Role-Based Access Control (RBAC):** Users belonging to `GIA-Role-Admins` / `SERA-Role-Admins` or `GIA-App-SAM-Admins` / `SERA-App-SAM-Admins` are granted elevated privileges across six granular permission flags enforced across both the React UI and FastAPI routers:
   - `can_delete_events`: Required to delete timeline events or trigger fast Verify & Resolve.
   - `can_run_benchmarks`: Required to launch or invalidate load-testing benchmarks.
   - `can_push_amu`: Required to trigger manual GitOps commits/pushes.
   - `can_manage_cmu_secrets`: Strictly required (`HTTP 403` otherwise) to create/delete Keycloak or HAProxy identities and to view client secrets from Vault (`GET /api/cmu/identity/{client_id}/secret`).
+  - `can_manage_cmu_models`: Strictly required (`HTTP 403` otherwise) to edit/commit model manifests and Kustomize overlays (`PUT /api/cmu/models/{model_name}/manifests`), trigger cluster discovery syncs (`POST /api/cmu/models/sync`), and execute rolling model deployments (`POST /api/cmu/models/deploy`).
+  - `can_manage_cmu_lora`: Strictly required (`HTTP 403` otherwise) to upload, sync, deploy, or disable LoRA adapters (`/api/cmu/lora/*`).
 - **DSN & Secret Sanitization:**
   - In `SeraStandardServiceImpl.GetDeepHealth()`, all database and Valkey URLs are stripped of passwords via `sanitize_dsn()` before being returned in `connection_metadata`.
   - In `sync_telemetry_task()`, CMU Vault sweeps strip `client_secret` / `secret` fields before caching `CMU_VAULT_INFO` in Valkey, ensuring non-admin users can browse client metadata (requestor, environment, description) without exposing credentials.
@@ -597,7 +619,7 @@ While SAM currently integrates the 5 core operational utilities (`HMU`, `AMU`, `
 
 ### 14.3. CU (Configuration Utility) & Dynamic Hot-Reloading
 - **Category:** (U) Utility (Planned Headless gRPC Service)
-- **Purpose:** Expand beyond CMU's identity/Vault scope to provide full lifecycle management of on-disk `config/settings.yaml` files across all ecosystem modules.
+- **Purpose:** Expand beyond CMU's identity/Vault/Model scope to provide full lifecycle management of on-disk `config/settings.yaml` files across all ecosystem modules.
 - **Capabilities:**
   - Maintain a central `module_registry.yaml` mapping module acronyms to filesystem config paths.
   - Expose `GetModuleConfig(module_name)` (with automatic secret field masking) and `UpdateModuleConfig(module_name, config_json)` (preserving YAML comments and structure).

@@ -4,8 +4,8 @@
 **Category:** (U) Utility
 **Name:** Configuration Management Utility
 **Acronym:** CMU
-**Version:** 0.3.5
-**Date:** 2026-10-12
+**Version:** 0.3.6
+**Date:** 2026-10-22
 **Author:** Martin Kecka & Gemini AI
 **Status:** Active
 
@@ -24,8 +24,8 @@ Its primary operational capabilities include:
 - **Database & Storage Provisioning:** Automated Day-1 creation, table ownership repair, and safe teardown of Patroni PostgreSQL databases and roles, with automatic Vault DSN injection.
 - **Global Cache & Valkey Orchestration:** Multi-region 9-node Valkey user ACL generation, dual DB index reservation tagging (`__GIA_DB_OWNER__`), and pre-provisioning validation of free DB indices on local Redis.
 - **Infrastructure Secrets & IAM Auditing:** Centralized HashiCorp Vault KV v2 CRUD operations, recursive key trees, AppRole policy inspection, and autonomous background scraping of Vault leader audit logs.
-- **AI Model & LoRA Deployment:** Declarative manifest and Kustomize overlay rollouts to Rancher GPU clusters, sequential compute deployment with GPU VRAM clearing, real-time vLLM startup milestone log tracking, and ephemeral pod tarball streaming for LoRA adapter weights.
-- **Declarative GitOps & Drift Verification:** Continuous drift detection comparing GitLab repository manifests against live Kubernetes workloads in `sera-llm` to ensure declarative infrastructure parity (focusing on declarative manifest drift, while physical hardware and VRAM consumption are monitored by HMU).
+- **AI Model & LoRA Deployment:** Declarative manifest and Kustomize overlay rollouts to Rancher GPU clusters (with automatic teardown of removed GPU tier deployments), sequential compute deployment with GPU VRAM clearing, real-time vLLM startup milestone log tracking, canonical local LoRA repository management (`/ai/assets/lora_models`), and ephemeral pod tarball streaming for LoRA adapter weights.
+- **Declarative GitOps, Overlay Management & Drift Verification:** Continuous drift detection comparing GitLab repository manifests against live Kubernetes workloads in `sera-llm`, paired with direct manifest and Kustomize GPU overlay editing, creation, and deletion pushed to GitLab (`aif_models`).
 - **Active Directory DNS & Storage Expansion:** GSS-TSIG Kerberos dynamic DNS updates (`nsupdate`) and Prometheus-driven Kubernetes PVC volume auto-expansion.
 
 ---
@@ -150,7 +150,7 @@ graph TD
 │       ├── haproxy_cmds.py                 # CLI: `haproxy` (sync, apply)
 │       ├── identity_cmds.py                # CLI: `identity` (create, delete, audit, list, get-config, set-desc, test, get-secret)
 │       ├── lora_cmds.py                    # CLI: `lora` (upload, deploy, disable, list)
-│       ├── models_cmds.py                  # CLI: `models` (deploy, verify, sync, inventory, list)
+│       ├── models_cmds.py                  # CLI: `models` (deploy, verify, sync, inventory, list, manifests)
 │       ├── module_cmds.py                  # CLI: `module` (info, check-health)
 │       ├── rancher_cmds.py                 # CLI: `rancher` (rotate-tokens)
 │       ├── secret_cmds.py                  # CLI: `secret` (list, get, write, move, delete, audit, users list/get)
@@ -177,8 +177,8 @@ graph TD
 │   │   ├── haproxy_manager.py              # HAProxyManager: Config sync/apply, sk_aif_ key provisioning, live auth tests, log scraping
 │   │   ├── keycloak_manager.py             # KeycloakManager: OIDC client provisioning, secret syncing, auth testing, and event audits
 │   │   ├── kube_manager.py                 # KubeManager: Rancher K8s API client, Kustomize build, drift detection, scale-to-0 rollouts, PVC ops
-│   │   ├── lora_manager.py                 # LoraManager: YAML LoRA injection/removal, ephemeral transfer pod orchestration, PVC stats
-│   │   ├── models_manager.py               # ModelsManager: Sequential multi-tier model deployment, drift verification, and DB sync
+│   │   ├── lora_manager.py                 # LoraManager: Local repo sync, YAML LoRA injection/removal, live K8s args check, transfer pods
+│   │   ├── models_manager.py               # ModelsManager: Sequential multi-tier model deployment, manifest/overlay editor, drift verification
 │   │   ├── prometheus_manager.py           # PrometheusManager: Rancher proxy PromQL queries for PVC byte usage
 │   │   ├── psql_manager.py                 # PostgreSQLManager: Patroni role/DB provisioning, ownership repair, safe deletion, raw SQL
 │   │   ├── rancher_auth_manager.py         # RancherAuthManager: Local provider login, token rotation, and cluster ID mapping to Vault
@@ -280,28 +280,36 @@ CMU supports two distinct identity architectures controlled via the `--keycloak`
 
 ## 6. AI, LLM & Machine Learning Execution 🤖
 
-While CMU does not perform LLM inference itself, it is the primary orchestrator for deploying and managing **vLLM** and **NVIDIA NIM (`NIMService`)** inference engines and **LoRA (Low-Rank Adaptation)** weights across the GPU Kubernetes clusters (`*-aif-nvclu01`).
+While CMU does not perform LLM inference itself, it is the primary orchestrator for deploying and managing **vLLM** and **NVIDIA NIM (`NIMService`)** inference engines, **Kustomize GPU overlays**, and **LoRA (Low-Rank Adaptation)** weights across the GPU Kubernetes clusters (`*-aif-nvclu01`).
 
-### 6.1. Sequential Multi-Tier Model Deployment (`ModelsManager.deploy_model`)
+### 6.1. Sequential Multi-Tier Model Deployment & Manifest Lifecycle (`ModelsManager`)
 To prevent total capacity blackouts and GPU Out-Of-Memory (OOM) deadlocks during model updates:
-1. **Manifest Resolution:** Resolves the model's Kustomize overlay (`clusters/<cluster>`) or raw YAML manifest via the database inventory or Git cache.
+1. **Manifest Resolution:** Resolves the model's Kustomize overlay (`clusters/<cluster>`) or raw YAML manifest via the database inventory or Git cache (supporting both short `model_name` like `gemma-4-31b` and `logical_name` like `sera-ai-vllm-gemma-4-31b`).
 2. **Phase 1 — Base Infrastructure:** Filters and applies all non-compute resources first (`Service`, `PersistentVolumeClaim`, `ConfigMap`, `Ingress`).
-3. **Phase 2 — Sequential Compute Rollout:** Filters `Deployment` and `NIMService` manifests (optionally restricted to a single GPU tier via `--tier`, e.g., `gpu2` or `gpu3`). For each deployment sequentially:
+3. **Phase 1.5 — Obsolete Kustomize GPU Tier Teardown:** When deploying a Kustomize model across all configured tiers (`tier=None`), CMU compares live Kubernetes deployments matching `{logical_name}-*` against the desired `Deployment` names produced by `clusters/<cluster>/kustomization.yaml`. Any obsolete GPU tier deployments (e.g., when migrating a tier from `gpu2` to `gpu1`) are automatically deleted via `KubeManager.delete_deployment_and_wait_pods()`, which waits up to `180s` for the legacy pods to physically terminate and release GPU VRAM before new tiers are scheduled.
+4. **Phase 2 — Sequential Compute Rollout:** Filters `Deployment` and `NIMService` manifests (optionally restricted to a single GPU tier via `--tier`, e.g., `gpu2` or `gpu3`). For each deployment sequentially:
    - Applies the updated manifest to namespace `sera-llm`.
    - **Synchronous GPU Memory Teardown:**
      - Standard `Deployment` (`force_delete_deployment_pods`): Patches `spec.replicas = 0`, polls every `5s` (up to `180s`) until all matching pods physically terminate and release 100% of GPU VRAM, then patches `spec.replicas` back to the original count.
      - `NIMService` (`force_delete_nim_pods`): Because the NIM Operator enforces `replicas >= 1`, CMU deletes existing pods directly via `delete_namespaced_pod` and waits up to `180s` for termination before monitoring the new rollout.
    - **Dynamic Milestone-Aware Rollout Monitoring (`wait_for_deployment_rollout`):** Polls deployment status and tails the last `1000` lines of running vLLM container logs to stream real-time startup milestones (`Loading model from scratch`, `Prefetching checkpoint files`, `Loading weights took`, `Model loading took`, `Available KV cache memory`, `Graph capturing finished`, `JIT kernel warmup`, `Running FlashInfer autotune`, `torch.compile took`, `init engine ... took`, `Loaded new LoRA adapter`, `Starting vLLM server on http`, `Application startup complete`).
    - **Dynamic Idle Timeout Reset:** Uses a `900s` base timeout that automatically resets (`start_time = time.time()`) whenever a new vLLM log milestone is detected, preventing premature timeouts on large models or heavily loaded GPU nodes. If all desired replicas enter `CrashLoopBackOff`, `Error`, or non-zero exit states, CMU immediately dumps the last 50 error/traceback lines and aborts the rollout.
-4. **Phase 3 — Post-Deploy Topology Sync:** Automatically triggers `sync_models('all')` to update the PostgreSQL inventory.
+5. **Phase 3 — Post-Deploy Topology Sync:** Automatically triggers `sync_models('all')` to update the PostgreSQL inventory.
+6. **GitLab Manifest & Kustomize Overlay Management (`get_model_manifests` / `save_model_manifests`):**
+   - Inspects a model's GitLab repository directory (`base/`, `overlays/deployment-*`, `clusters/*`) and parses active GPU tier references per cluster (`prg`, `slo`, `nyc`).
+   - Validates all modified YAML files (`yaml.safe_load_all`), supports creating new Kustomize GPU overlays (`overlays/deployment-<tier>`) and deleting obsolete overlay directories (while strictly forbidding file creation or deletion outside `overlays/`), commits, and pushes changes to GitLab (`aif_models`).
 
 ### 6.2. LoRA Adapter Lifecycle (`LoraManager`)
+- **Canonical Local Repository (`/ai/assets/lora_models`):**
+  - Configured via `paths.lora_models_dir` in `settings.yaml` and exposed as location `local` (`lora list --location local` or included automatically in `--location all`).
+  - `resolve_and_sync_local_lora()` accepts a directory or archive (`.zip`, `.tar.gz`, `.tgz`, `.tar`), extracts/copies the adapter into `/ai/assets/lora_models/<model>/<lora_name>` (flattening single top-level wrapper folders), or resolves existing weights directly from `/ai/assets/lora_models/<model>/<lora_name>` when `--path` is omitted.
 - **Tarball Streaming via Ephemeral Transfer Pod (`upload_lora` / `deploy_lora`):**
   1. Applies `pvc-lora.yaml` and spawns an ephemeral pod `lora-transfer-<model>` (`alpine:latest`, `sleep 3600`) mounting the LoRA PVC at `/data/lora` in namespace `sera-llm`.
   2. Executes `rm -rf /data/lora/<lora_name> && mkdir -p /data/lora/<lora_name>` inside the transfer pod.
   3. Compresses the local LoRA directory into a temporary `.tar.gz` archive and streams it in `128KB` chunks over the Kubernetes WebSocket exec API (`tar xzf - -C /data/lora/<lora_name>`), reporting transfer speed every `50MB`.
   4. Deletes the transfer pod.
 - **GitOps YAML Injection (`inject_lora_to_yaml`):** Automatically patches the base `deployment.yaml` with `--enable-lora`, `--max-lora-rank 64`, `--lora-modules <lora_name>=/data/lora/<lora_name>`, and the `lora-volume` mount/claim, commits the change, pushes to GitLab (`aif_models`), and delegates the rollout to `ModelsManager.deploy_model`.
+- **Live Kubernetes Per-Cluster Verification (`_get_live_cluster_applied_loras`):** When listing LoRA adapters on a cluster (`prg`, `slo`, `nyc`), `list_lora` inspects the live Kubernetes `Deployment` and running `Pod` container `args` (`--lora-modules`) in namespace `sera-llm` (falling back to Git YAML only if no live deployment is present), ensuring accurate per-cluster `is_applied` status when an adapter is enabled or disabled on a single cluster.
 
 ---
 
@@ -318,8 +326,9 @@ CMU persists state in PostgreSQL (`sam_admin_prod_db`) using SQLAlchemy ORM (`co
 | `vault_audit_metrics` | `VaultAuditMetric` | `id` (UUID String), Unique: `(date, user_identity, secret_path, operation)` | `date` (Date), `user_identity` (String), `secret_path` (String), `operation` (String), `access_count` (Integer), `last_accessed_at` (DateTime). Aggregated daily Vault KV access metrics. |
 | `llm_client_usage_metrics` | `LLMClientUsageMetric` | `id` (UUID String), Unique: `(date, client_id, auth_type)` | `date` (Date), `client_id` (String), `auth_type` (`HAProxy` or `Keycloak`), `ping_count` (Integer, HTTP `GET`), `usage_count` (Integer, HTTP `POST`/other), `last_ping_at` (DateTime), `last_usage_at` (DateTime). |
 
-### 7.2. Local Filesystem Cache State
+### 7.2. Local Filesystem Cache & Repository State
 - **Git Repositories:** Shallow clones (`--depth 1`) stored in `cache/gtt-ai-factory-models` (`aif_models`) and `cache/ai-infrastructure` (`aif_common`). Synchronized via `git fetch origin main && git reset --hard origin/main && git clean -fd`.
+- **Local LoRA Adapter Repository:** Canonical storage directory `/ai/assets/lora_models/<model>/<lora_name>` (`paths.lora_models_dir`), storing extracted adapter weights (`adapter_config.json`, `adapter_model.safetensors`, tokenizer files) for distribution to cluster PVCs.
 - **HAProxy Configurations:** Node-specific configs and timestamped backups stored in `cache/haproxy/<node_fqdn>/haproxy.cfg` and `llm_keys.map`, plus the central `cache/haproxy/llm_keys.map`.
 
 ---
@@ -365,20 +374,22 @@ CMU exposes two gRPC services on port `50105`, along with standard gRPC Health C
 | **Deployment** | `GitGetFile` | `GitGetFileRequest` | `GitGetFileResponse` | Unary | Fetches raw file content from GitLab API. |
 | **Deployment** | `GitSync` | `GitSyncRequest` | `GitSyncResponse` | Unary | Syncs and hard-resets local Git cache repository. |
 | **Deployment** | `GitPush` | `GitPushRequest` | `GitPushResponse` | Unary | Commits and pushes local cache modifications to GitLab `main`. |
-| **Deployment** | `DeployModel` | `DeployModelRequest` | `DeployModelResponse` | **Server Stream** | Sequentially deploys model manifests/Kustomize overlays with GPU teardown & log tracking. |
+| **Deployment** | `DeployModel` | `DeployModelRequest` | `DeployModelResponse` | **Server Stream** | Sequentially deploys model manifests/Kustomize overlays with obsolete tier cleanup, GPU teardown & log tracking. |
 | **Deployment** | `DeployApp` | `DeployAppRequest` | `DeployAppResponse` | Unary | Deploys an application YAML manifest from `aif_common` to a target cluster. |
 | **Deployment** | `VerifyModel` | `VerifyModelRequest` | `VerifyModelResponse` | Unary | Detects drift between GitLab manifests/Kustomize and live GPU clusters. |
 | **Deployment** | `VerifyApp` | `VerifyAppRequest` | `VerifyAppResponse` | Unary | Detects drift between `aif_common` manifests and live App clusters. |
 | **Deployment** | `ModelsSync` | `ModelsSyncRequest` | `ModelsSyncResponse` | Unary | Runs global K8s discovery and updates `AiModelInventory` in PostgreSQL. |
 | **Deployment** | `ModelsInventory` | `ModelsInventoryRequest` | `ModelsInventoryResponse` | Unary | Queries `AiModelInventory` and `AiModelResource` topology from PostgreSQL. |
 | **Deployment** | `ModelsList` | `ModelsListRequest` | `ModelsListResponse` | Unary | Returns partitioned lists of `models` vs `other` infrastructure workloads. |
+| **Deployment** | `ModelGetManifests` | `ModelGetManifestsRequest` | `ModelGetManifestsResponse` | Unary | Returns all GitLab YAML manifests, Kustomize overlays, and cluster tier mappings for a model. |
+| **Deployment** | `ModelSaveManifests` | `ModelSaveManifestsRequest` | `ModelSaveManifestsResponse` | Unary | Updates YAML manifests, creates/deletes `overlays/deployment-*` tiers, commits, and pushes to GitLab. |
 | **Volumes** | `VolumesSearch` | `VolumesSearchRequest` | `VolumesSearchResponse` | Unary | Searches PVCs/PVs across all Rancher clusters with Prometheus usage stats. |
 | **Volumes** | `VolumesExpand` | `VolumesExpandRequest` | `VolumesExpandResponse` | Unary | Resizes a PVC (`new_size` or `auto` for +5Gi/+10%). |
 | **Volumes** | `VolumesScan` | `VolumesScanRequest` | `VolumesScanResponse` | Unary | Scans all clusters for PVCs exceeding `usage_threshold` percentage. |
-| **LoRA** | `LoraUpload` | `LoraUploadRequest` | `LoraUploadResponse` | **Server Stream** | Streams LoRA weights to PVC via transfer pod without restarting the model. |
-| **LoRA** | `LoraDeploy` | `LoraDeployRequest` | `LoraDeployResponse` | **Server Stream** | Injects LoRA into Git YAML, streams weights to PVC, and rolls out deployment. |
+| **LoRA** | `LoraUpload` | `LoraUploadRequest` | `LoraUploadResponse` | **Server Stream** | Syncs LoRA weights to `/ai/assets/lora_models` (`local`) and/or streams to cluster PVCs without restarting the model. |
+| **LoRA** | `LoraDeploy` | `LoraDeployRequest` | `LoraDeployResponse` | **Server Stream** | Syncs local repo, injects LoRA into Git YAML, streams weights to PVC, and rolls out deployment. |
 | **LoRA** | `LoraDisable` | `LoraDisableRequest` | `LoraDisableResponse` | **Server Stream** | Strips specific or `--all` LoRAs from Git YAML and rolls out deployment. |
-| **LoRA** | `LoraList` | `LoraListRequest` | `LoraListResponse` | Unary | Lists LoRAs on PVCs (`du -sh`, `ls -ld`) and checks if applied in `deployment.yaml`. |
+| **LoRA** | `LoraList` | `LoraListRequest` | `LoraListResponse` | Unary | Lists LoRAs in `/ai/assets/lora_models` (`local`) and cluster PVCs, verifying live K8s `Deployment`/`Pod` `--lora-modules` args. |
 | **DNS** | `DnsList` | `DnsListRequest` | `DnsListResponse` | Unary | Performs AXFR zone transfer and returns filtered DNS records. |
 | **DNS** | `DnsCreate` | `DnsCreateRequest` | `DnsCreateResponse` | Unary | Creates a DNS record via GSS-TSIG `nsupdate`. |
 | **DNS** | `DnsDelete` | `DnsDeleteRequest` | `DnsDeleteResponse` | Unary | Deletes a DNS record via GSS-TSIG `nsupdate`. |
@@ -442,8 +453,8 @@ All CLI commands support `--grpc` (where applicable) to output raw protobuf resp
 | **`cache`** | `create <MOD> <CAT> <ENV> [--start-db 1]`<br/>`inspect`<br/>`update-perms <USER>`<br/>`delete <USER> [--yes]`<br/>`redis-free <DB_INDEX> [--yes]` | Manages global 9-node Valkey ACLs and DB reservations, plus local Dev Redis inspection and DB flushing. |
 | **`dns`** | `servers`<br/>`list <ZONE>`<br/>`create <ZONE> <NAME> <TYPE> <VAL> [--ttl 3600]`<br/>`delete <ZONE> <NAME> <TYPE>` | Lists AD DNS servers, executes AXFR zone transfers, and performs secure GSS-TSIG dynamic DNS updates. |
 | **`git`** | `sync [--domain aif_models\|aif_common]`<br/>`push --domain ... -m <MSG>`<br/>`tree [--domain ...] [--path ...]` | Syncs, commits/pushes, or lists repository trees for GitLab infrastructure repos. |
-| **`models`** | `deploy --model <NAME> [--cluster all] [--tier gpu2\|gpu3] [--verify]`<br/>`verify [--model NAME \| --file-path PATH] [--cluster all] [--show-live]`<br/>`sync [--cluster NAME]`<br/>`inventory [--model] [--location] [--namespace]`<br/>`list [--location]` | Orchestrates sequential vLLM/NIM model rollouts, multi-cluster Kustomize drift detection, global K8s topology discovery, and database inventory queries. |
-| **`lora`** | `upload --model <M> --path <P> --location <L> --lora-name <N>`<br/>`deploy --model <M> --path <P> --location <L> --lora-name <N> [--tier T]`<br/>`disable --model <M> --location <L> [--lora-name N \| --all]`<br/>`list [--model M] [--location all]` | Uploads, enables, disables, or lists LoRA adapters across GPU clusters. |
+| **`models`** | `deploy --model <NAME> [--cluster all] [--tier gpu2\|gpu3] [--verify]`<br/>`verify [--model NAME \| --file-path PATH] [--cluster all] [--show-live]`<br/>`sync [--cluster NAME]`<br/>`inventory [--model] [--location] [--namespace]`<br/>`list [--location]`<br/>`manifests <MODEL> [--grpc]` | Orchestrates sequential vLLM/NIM model rollouts (with automatic obsolete Kustomize tier teardown), multi-cluster drift detection, global K8s topology discovery, DB inventory queries, and GitLab manifest/overlay inspection. |
+| **`lora`** | `upload --model <M> [--path P] --location <L> --lora-name <N> [--grpc]`<br/>`deploy --model <M> [--path P] --location <L> --lora-name <N> [--tier T] [--grpc]`<br/>`disable --model <M> --location <L> [--lora-name N \| --all] [--grpc]`<br/>`list [--model M] [--location all\|local\|prg\|slo\|nyc] [--grpc]` | Uploads, enables, disables, or lists LoRA adapters across `/ai/assets/lora_models` (`local`) and GPU clusters (`prg`, `slo`, `nyc`). |
 | **`app`** | `deploy --file-path <P> [--cluster slo] [--namespace default]`<br/>`verify --file-path <P> [--cluster all] [--namespace] [--show-live]` | Deploys or verifies standard application manifests from `aif_common`. |
 | **`volumes`** | `search <VOL_NAME> [--cluster]`<br/>`expand --cluster <C> --namespace <NS> --pvc-name <P> --size <S\|auto>`<br/>`scan [--cluster all] [--usage-threshold 90.0]` | Searches PVCs/PVs globally, expands PVC storage dynamically, and scans for high-utilization volumes via Prometheus. |
 | **`rancher`** | `rotate-tokens` | Rotates Rancher API tokens via local provider login across all regions and updates `secret/rancher/{loc}/system/gia_ai` in Vault. |
@@ -482,8 +493,10 @@ python3 configuration_management_utility.py git sync --domain aif_models
 
 # AI Model Deployments & LoRA Adapters
 python3 configuration_management_utility.py models list --location slo
-python3 configuration_management_utility.py models deploy --model google/gemma-4-31B-it --cluster all --tier gpu3 --verify
-python3 configuration_management_utility.py lora list --model google/gemma-4-31B-it --location all
+python3 configuration_management_utility.py models inventory --model gemma-4-31b --grpc
+python3 configuration_management_utility.py models manifests gemma-4-31b
+python3 configuration_management_utility.py models deploy --model gemma-4-31b --cluster all --tier gpu2 --verify
+python3 configuration_management_utility.py lora list --model gemma-4-e4b --location all
 python3 configuration_management_utility.py volumes scan --cluster all --usage-threshold 90.0
 python3 configuration_management_utility.py rancher rotate-tokens
 ```
@@ -498,7 +511,7 @@ python3 configuration_management_utility.py rancher rotate-tokens
 | Configuration Key | Default / Configured Value | Purpose |
 | :--- | :--- | :--- |
 | `module_info.acronym` | `"CMU"` | Module identifier injected into `x-client-id` gRPC metadata. |
-| `module_info.version` | `"0.3.5"` | Static config version (runtime `GetAppInfo` reads `docs/CHANGELOG.yaml`). |
+| `module_info.version` | `"0.3.6"` | Static config version (runtime `GetAppInfo` reads `docs/CHANGELOG.yaml`). |
 | `system_services.grpc.service_name` | `"cmu-grpc.service"` | Systemd unit name checked during health probes. |
 | `system_services.grpc.host` / `port` | `"0.0.0.0"` / `50105` | Bind address and port for the CMU gRPC server. |
 | `system_services.grpc.max_workers` | `10` | ThreadPoolExecutor worker count for gRPC requests. |
@@ -506,6 +519,7 @@ python3 configuration_management_utility.py rancher rotate-tokens
 | `paths.proto_source_dir` | `"grpc_api/protos"` | Relative directory containing `cmu.proto`. |
 | `paths.sera_proto_source_dir` | `"/ai/assets/protos/sera_standard"` | Shared directory containing `sera_standard.proto`. |
 | `paths.generated_stubs_path` | `"/ai/assets/protos/configuration_management_utility/generated"` | Output path for compiled `*_pb2.py` and `*_pb2_grpc.py` stubs. |
+| `paths.lora_models_dir` | `"/ai/assets/lora_models"` | Canonical local filesystem repository for LoRA adapter weights (`<model>/<lora_name>`). |
 | `database.write_dsn` | `postgresql://sam_admin_prod_user:***@slo-aif-hadb.slo.gt-t.net:5432/sam_admin_prod_db` | Primary read/write Patroni PostgreSQL connection string. |
 | `database.read_dsn` | `postgresql://sam_admin_prod_user:***@slo-aif-ha.slo.gt-t.net:5433/sam_admin_prod_db` | Read-replica Patroni PostgreSQL connection string. |
 | `external_services.active_directory` | `domain: GICORP.MYPOP2POP.COM`, `vault_secret_path: active_directory/global/shared/dns_gia` | AD DNS domain and Vault path for Kerberos keytab credentials. |
@@ -528,7 +542,7 @@ python3 configuration_management_utility.py rancher rotate-tokens
 
 ### 12.3. Hardware Affinity & Execution Boundaries
 - CMU itself is lightweight and CPU-bound, running on standard application nodes.
-- All AI model and LoRA operations (`DeployModel`, `VerifyModel`, `LoraUpload`, `LoraDeploy`, `LoraDisable`, `LoraList`, `ModelDiscoveryManager`) explicitly target Rancher GPU clusters (`is_gpu=True` -> `gpu_cluster_name`: `prg-aif-nvclu01`, `slo-aif-nvclu01`, `nyc-aif-nvclu01`) and support multi-pool GPU hardware tiers (`--tier gpu2`, `--tier gpu3`).
+- All AI model and LoRA operations (`DeployModel`, `VerifyModel`, `ModelGetManifests`, `ModelSaveManifests`, `LoraUpload`, `LoraDeploy`, `LoraDisable`, `LoraList`, `ModelDiscoveryManager`) explicitly target Rancher GPU clusters (`is_gpu=True` -> `gpu_cluster_name`: `prg-aif-nvclu01`, `slo-aif-nvclu01`, `nyc-aif-nvclu01`) and support multi-pool GPU hardware tiers (`--tier gpu0`, `--tier gpu1`, `--tier gpu2`, `--tier gpu3`).
 
 ---
 
@@ -536,7 +550,7 @@ python3 configuration_management_utility.py rancher rotate-tokens
 
 - **Unified gRPC Fault Barrier (`@handle_rpc`):** Every `CmuService` method (both unary and streaming generator RPCs) is wrapped by `@handle_rpc`, which catches any unhandled exception, logs the error alongside the caller's `x-client-id`, and returns a structured protobuf response (`success=False, message=str(e)`) rather than crashing the worker thread.
 - **HAProxy Pre-Flight Validation & Rollback Protection:** `HAProxyManager.apply_configs_stream` backs up the live remote config before uploading changes to `/tmp/haproxy.cfg.new` and runs `haproxy -c -f /tmp/haproxy.cfg.new`. If syntax validation fails, the temporary file is removed and the live HAProxy process is left untouched.
-- **vLLM OOM Prevention & Crash Diagnostics:** `KubeManager.force_delete_deployment_pods` scales deployments to `0` and waits for physical pod termination before scaling up, preventing GPU OOM deadlocks. During rollout, `wait_for_deployment_rollout` resets its `900s` timeout clock on every verified vLLM log milestone and automatically extracts container error/traceback logs if pods enter `CrashLoopBackOff`.
+- **vLLM OOM Prevention & Crash Diagnostics:** `KubeManager.force_delete_deployment_pods` scales deployments to `0` and waits for physical pod termination before scaling up, and `KubeManager.delete_deployment_and_wait_pods` removes obsolete Kustomize GPU tier deployments and waits for pod termination before applying new tiers, preventing GPU OOM deadlocks. During rollout, `wait_for_deployment_rollout` resets its `900s` timeout clock on every verified vLLM log milestone and automatically extracts container error/traceback logs if pods enter `CrashLoopBackOff`.
 - **Smart Kubernetes Drift Filtering (`_find_drift`):** Matches lists of dictionaries by their `name` key (preventing false-positive drift alerts when Kustomize reorders environment variables or mounts), ignores empty dicts/lists, flags Kubernetes-dropped default values (`0`, `False`, `""`) with actionable hints, and truncates string mismatches over 50 characters.
 - **DNS Multi-DC Failover:** `DNSManager.list_records` maintains an `exclude_ips` set during AXFR zone transfers, automatically failing over across regional Active Directory Domain Controllers if a server refuses transfer or times out.
 
@@ -547,9 +561,9 @@ python3 configuration_management_utility.py rancher rotate-tokens
 The following capabilities define the future architectural state of CMU, extending its role as the definitive control plane for ecosystem infrastructure and addressing next-generation operational requirements.
 
 ### 14.1. Structured Mutation Audit Ledger (`cmu_audit_log`)
-While CMU v0.3.5 already runs autonomous background monitors for Vault secret access (`vault_audit_metrics`) and HAProxy LLM routing (`llm_client_usage_metrics`), it still requires a deterministic Audit Ledger in PostgreSQL to track mutating control-plane actions. Because Kubernetes and Rancher audit logs are noisy and fail to capture logical business intent, CMU will act as a strict tollbooth for all infrastructure changes. By forcing deployments and provisioning through CMU's gRPC endpoints, any cluster or infrastructure modification not present in the CMU audit table can be immediately flagged as a rogue, manual intervention (e.g., a direct root override on a node).
+While CMU v0.3.6 already runs autonomous background monitors for Vault secret access (`vault_audit_metrics`) and HAProxy LLM routing (`llm_client_usage_metrics`), it still requires a deterministic Audit Ledger in PostgreSQL to track mutating control-plane actions. Because Kubernetes and Rancher audit logs are noisy and fail to capture logical business intent, CMU will act as a strict tollbooth for all infrastructure changes. By forcing deployments and provisioning through CMU's gRPC endpoints, any cluster or infrastructure modification not present in the CMU audit table can be immediately flagged as a rogue, manual intervention (e.g., a direct root override on a node).
 
-This will be implemented directly within the `@handle_rpc` decorator and mutating gRPC endpoint handlers (e.g., `DeployModel`, `LoraDeploy`, `DbCreate`, `CreateCache`, `VaultWrite`, `DnsCreate`, `ApplyHAProxyConfigs`, `GitPush`). Read-only inspection and list operations will bypass the audit logger to prevent database bloat.
+This will be implemented directly within the `@handle_rpc` decorator and mutating gRPC endpoint handlers (e.g., `DeployModel`, `ModelSaveManifests`, `LoraDeploy`, `DbCreate`, `CreateCache`, `VaultWrite`, `DnsCreate`, `ApplyHAProxyConfigs`, `GitPush`). Read-only inspection and list operations will bypass the audit logger to prevent database bloat.
 
 **Table Schema (`cmu_audit_log`):**
 - **`log_id`** (UUID, Primary Key)
@@ -567,7 +581,7 @@ While CMU already implements on-demand Prometheus capacity scanning (`volumes sc
 - **The Audit Threshold (Circuit Breaker):** Integrates directly with `cmu_audit_log`. If a specific PVC triggers autonomous expansion more than 3 consecutive times within a defined window, CMU will halt auto-expansion for that volume and dispatch an alert via OMU to prevent runaway storage allocation caused by application memory/disk leaks.
 
 ### 14.3. HAProxy Runtime Socket & Data Plane API Integration
-In v0.3.5, `HAProxyManager` orchestrates `haproxy.cfg` and `llm_keys.map` updates via Paramiko SFTP uploads, `haproxy -c` pre-flight validation, and `systemctl reload haproxy`. While reliable, full process reloads briefly spawn new worker processes across the fleet.
+In v0.3.6, `HAProxyManager` orchestrates `haproxy.cfg` and `llm_keys.map` updates via Paramiko SFTP uploads, `haproxy -c` pre-flight validation, and `systemctl reload haproxy`. While reliable, full process reloads briefly spawn new worker processes across the fleet.
 - **Runtime Socket / Data Plane API:** Future iterations will integrate with the HAProxy Runtime API (via Unix socket over SSH or the HTTP Data Plane API) to inject and revoke `sk_aif_` SHA-256 key hashes directly into in-memory map tables (`add map` / `del map` on `/etc/haproxy/llm_keys.map`) and dynamically drain or weight backend GPU cluster endpoints with zero process reloads.
 
 ### 14.4. Vector Database (Qdrant / ChromaDB) Provisioning Domain
