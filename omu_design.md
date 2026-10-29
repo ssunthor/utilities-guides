@@ -4,8 +4,8 @@
 **Category:** (U) Utility
 **Name:** Operations Management Utility
 **Acronym:** OMU
-**Version:** 0.4.1
-**Date:** 2026-10-12
+**Version:** 0.4.5
+**Date:** 2026-10-27
 **Author:** Martin Kecka & Gemini AI
 **Status:** Active
 
@@ -23,7 +23,7 @@ Its primary operational capabilities include:
 - **Zero-Downtime Rolling OS Patching:** Sequential orchestration of host package upgrades (`apt-get dist-upgrade`), in-place daemon suppression (`policy-rc.d`), LVM root volume auto-resizing, and reboot coordination.
 - **Stateful Cluster Consensus & Failover Hooks:** Pre-reboot leader step-down and dynamic failovers across distributed consensus systems (Patroni PostgreSQL, Apache Kafka KRaft, etcd/DCS, Valkey/Sentinel, Qdrant, Vault Raft, HAProxy/Keepalived VRRP, and RKE2 Kubernetes master/worker cordon & drain).
 - **Automated Infrastructure Inventory Synchronization:** Bi-directional synchronization between NetBox DCIM/Virtualization APIs, Rancher Kubernetes cluster workloads, and local PostgreSQL `managed_nodes`.
-- **Autonomous Fleet Health & Package Inspection:** Scheduled background inspection daemons sweeping host fleets for pending security packages, kernel updates, and reboot requirements without executing mutations (`inspect_only`).
+- **Autonomous Weekend Patching Scheduler & Drift Evaluator:** Dynamic post-inspection evaluation of kernel updates and 30-day patch age across all groups, populating a staggered 30-minute weekend execution queue (`patching_schedules`) with single-flight execution locking, visibility-only auto-rollover for disabled groups, and built-in SMTP email reporting (Friday digest, immediate failure alerts, and Sunday summary).
 - **Keepalived VRRP Topology & Failover Pre-Check:** Read-only inspection of Keepalived VRRP configurations and VIP allocations (`haproxy config-explorer`) strictly to verify peer takeover readiness during load balancer OS maintenance (contrasting with CMU's configuration authoring and deployment ownership).
 - **Execution Auditing & Log Streaming:** Real-time gRPC log streaming via thread-safe queues, with detailed host kernel transition and package upgrade persistence in PostgreSQL (`patching_runs`, `node_patch_logs`) and flat-file fallback.
 
@@ -35,12 +35,12 @@ OMU operates on a client-server architecture, exposing dual gRPC servicers backe
 
 ### 2.1. Dual Servicer & Core Architectural Principles
 - **Dual Servicer Model:**
-  1. **`OmuService` (`omu.proto`):** Domain servicer exposing RPCs for live fleet introspection, streaming rolling OS patching (`ExecuteRollingPatch`), inventory synchronization (`SyncInventory`), summary metrics, and execution audit log retrieval.
+  1. **`OmuService` (`omu.proto`):** Domain servicer exposing RPCs for live fleet introspection, streaming rolling OS patching (`ExecuteRollingPatch`), inventory synchronization (`SyncInventory`), summary metrics, autonomous schedule management (`GetSchedules`, `ManageSchedule`), and execution audit log retrieval.
   2. **`SeraAppService` (`sera_standard.proto`):** Implements the universal SERA ecosystem standard contract (maintained centrally by AMU) for self-reporting OMU's metadata, deep health matrix, documentation, and changelog.
 - **The Privilege Boundary:** Alongside CMU, OMU is an isolated administrative utility permitted to hold root-level SSH credentials (`syseng_ansible`), database administrative credentials, and Vault AppRole tokens required to mutate host state.
 - **Autonomous Introspection ("Check Before Mutate"):** Retains localized, synchronous introspection logic directly against target infrastructure (Patroni REST APIs, Kafka KRaft quorums, Redis keyspaces, etcd maintenance endpoints) without depending on external observability engines, preventing cyclic dependencies during cold-starts or network partitions.
 - **Zero-Downtime Orchestration:** Destructive maintenance strictly follows distributed consensus rules. Leaders are failed over, Kubernetes workloads are safely drained (`cordon`/`drain`), and nodes are verified healthy post-reboot before the orchestrator touches the next node in the topology.
-- **Autonomous Standalone Operation:** Functions as a complete standalone system with direct SSH connection pooling (Paramiko), background daily inspection daemons (`SchedulerManager`), and an interactive Click CLI.
+- **Autonomous Standalone Operation:** Functions as a complete standalone system with direct SSH connection pooling (Paramiko), background daily inspection and weekend scheduling daemons (`SchedulerManager`), built-in SMTP reporting (`EmailClient`), and an interactive Click CLI.
 - **SAM Fleet Operations Backend:** Powers the fleet patching dashboard, live audit log streams, and inventory summaries within the **Sera Admin Module (SAM)** UI.
 - **High-Availability Persistence Isolation:** Utilizes split read/write SQLAlchemy connection pools (`write_dsn` on `:5432` and `read_dsn` on `:5433`) with `pool_pre_ping=True` and connection-hold prevention.
 - **Dynamic Call Tracing & Provenance:** Automatically intercepts and logs `x-client-id` metadata headers (`[SAM]`, `[CLI]`, `[OMU]`) across all RPCs for end-to-end operation auditing.
@@ -52,7 +52,7 @@ graph TD
     subgraph Clients ["Clients, Operators & Control Plane"]
         SAM["Sera Admin Module (SAM UI)"]
         CLI["OMU Click CLI (omu_cli.py)"]
-        SCHED["SchedulerManager (Daily Daemon)"]
+        SCHED["SchedulerManager (Daily Inspect & Weekend Patch Daemon)"]
         AMU["Application Management Utility (AMU)"]
     end
 
@@ -64,6 +64,7 @@ graph TD
         INTRO["Component Introspectors (11x)"]
         PATCH["Patching Orchestrators (10x)"]
         MGR["Domain Managers (SSH, K8s, Rancher, Patroni, Valkey, etc.)"]
+        EMAIL["EmailClient (SMTP Digest & Failure Alerts)"]
     end
 
     subgraph Persistence ["HA Persistence Layer"]
@@ -85,7 +86,8 @@ graph TD
 
     CLI -->|gRPC + x-client-id| GRPC
     SAM -->|gRPC + x-client-id| GRPC
-    SCHED -->|Internal Loop| GRPC
+    SCHED -->|Internal Loop & Single-Flight Lock| OMU_SVC
+    SCHED -->|SMTP Notifications| EMAIL
     AMU -->|GetAppInfo / GetDeepHealth| GRPC
 
     GRPC --> OMU_SVC
@@ -125,7 +127,7 @@ graph TD
 ├── README.md                             # High-level repository overview and links to master SERA Guides
 ├── config/
 │   ├── __init__.py                       # Config package marker
-│   └── settings.yaml                     # Master configuration (ports, database DSNs, Vault/NetBox credentials, Rancher clusters, HAProxy VIPs, strategy mappings)
+│   └── settings.yaml                     # Master configuration (ports, database DSNs, Vault/NetBox credentials, Rancher clusters, HAProxy VIPs, strategy & scheduler settings)
 ├── cli/
 │   ├── __init__.py                       # CLI package marker
 │   ├── omu_cli.py                        # Root Click group (NestedHelpGroup), server launcher, and subcommand registration
@@ -144,6 +146,7 @@ graph TD
 │       ├── patroni_cmds.py               # `patroni status`, `patroni inspect`, and `patroni patch` for PostgreSQL HA clusters
 │       ├── qdrant_cmds.py                # `qdrant status`, `qdrant inspect`, and `qdrant patch` for Qdrant vector clusters
 │       ├── rancher_cmds.py               # `rancher status`, `rancher inspect`, and `rancher patch` for standalone Rancher servers
+│       ├── schedule_cmds.py              # `schedule list`, `schedule evaluate`, `schedule set`, `schedule remove`, and `schedule email`
 │       ├── ssh_cmds.py                   # `ssh verify` and `ssh execute` for ad-hoc remote command execution
 │       ├── status_cmds.py                # `status all` executing sequential global fleet audits across all components
 │       ├── valkey_cmds.py                # `valkey status`, `valkey inspect`, and `valkey patch` for Valkey/Sentinel clusters
@@ -153,16 +156,17 @@ graph TD
 │   ├── inventory_sync.py                 # InventorySynchronizer: Correlates NetBox VMs and Rancher K8s workloads into managed_nodes
 │   ├── clients/
 │   │   ├── __init__.py                   # Clients package marker
+│   │   ├── email_client.py               # Built-in SMTP email dispatcher for Friday digest, failure alerts, and Sunday summary reports
 │   │   ├── netbox_client.py              # REST client wrapper for NetBox virtualization, DCIM, and IPAM APIs
 │   │   └── vault_client.py               # AppRole authentication engine with Vault KV v2 secret retrieval
 │   ├── database/
 │   │   ├── __init__.py                   # Database package marker
 │   │   ├── database.py                   # SQLAlchemy engine initialization, QueuePool pooling, and get_db_session context manager
-│   │   └── models.py                     # Declarative ORM models: ManagedNode, PatchingRun, and NodePatchLog
+│   │   └── models.py                     # Declarative ORM models: ManagedNode, PatchingRun, NodePatchLog, and PatchingSchedule
 │   ├── io_handlers/
 │   │   ├── __init__.py                   # IO handlers package marker
-│   │   ├── sql_reader.py                 # Read-only queries for nodes, groups, strategies, and audit logs
-│   │   └── sql_writer.py                 # Mutation abstractions for upserting nodes, recording updates, and writing patch logs
+│   │   ├── sql_reader.py                 # Read-only queries for nodes, groups, strategies, schedules, and audit logs
+│   │   └── sql_writer.py                 # Mutation abstractions for upserting nodes, schedules, recording updates, and writing patch logs
 │   ├── introspectors/
 │   │   ├── __init__.py                   # Introspectors package marker
 │   │   ├── base_introspector.py          # Abstract base class for concurrent health checks, FQDN resolution, and VIP checks
@@ -173,11 +177,11 @@ graph TD
 │   │   ├── haproxy_manager.py            # SSH manager parsing keepalived configs, VIP bindings, and haproxy.cfg
 │   │   ├── k8s_manager.py                # Kubernetes client wrapper with Rancher API proxy, token refresh, and cordon/drain ops
 │   │   ├── kafka_manager.py              # SSH manager querying kafka-metadata-quorum.sh and kafka-topics.sh
-│   │   ├── keycloak_manager.py           # REST client for Keycloak cluster health checks and OIDC token testing
+│   │   ├── keycloak_manager.py           # Read-only REST helper for Keycloak health checks and OIDC token testing
 │   │   ├── patroni_manager.py            # PostgreSQL psycopg2 manager for pg_stat_replication lag introspection
 │   │   ├── qdrant_manager.py             # HTTP client querying Qdrant cluster and healthz endpoints
 │   │   ├── rancher_manager.py            # REST wrapper for Rancher clusters and K8s API proxy endpoints
-│   │   ├── scheduler_manager.py          # SchedulerManager: Background daemon executing daily inspect_only sweeps
+│   │   ├── scheduler_manager.py          # SchedulerManager: Daily inspection daemon, drift evaluator, single-flight weekend executor, and email scheduler
 │   │   ├── ssh_manager.py                # Paramiko SSH connection pooler with in-memory keys and sudo password scrubbing
 │   │   └── valkey_manager.py             # Redis-py manager for 9-node global cluster auditing and sentinel failover
 │   └── patching/
@@ -187,12 +191,15 @@ graph TD
 ├── grpc_api/
 │   ├── __init__.py                       # gRPC API package marker
 │   ├── generate_stubs.py                 # Compiles omu.proto and sera_standard.proto into generated stubs directory
-│   ├── omu_service.py                    # OmuServiceServicer: Fleet introspection, rolling patch worker streaming, and inventory sync
+│   ├── omu_service.py                    # OmuServiceServicer: Fleet introspection, rolling patch worker streaming, schedule management, and inventory sync
 │   ├── sera_standard_service.py          # Implementation of SeraAppService (GetAppInfo, GetDeepHealth, GetFeedback, GetChangelog, GetDocs)
 │   ├── services.py                       # Bootstraps gRPC server thread pool, binds servicers, reflection, and background daemons
 │   └── protos/
-│       ├── omu.proto                     # Protobuf contract for omu.v1.OmuService
+│       ├── omu.proto                     # Protobuf contract for omu.OmuService
 │       └── sera_standard.proto           # Master ecosystem Protobuf contract for sera.standard.v1.SeraAppService
+├── scripts/
+│   ├── alter_table.py                    # Database schema migration script adding `auto_patch` to `managed_nodes` and initializing `patching_schedules`
+│   └── test_email.py                     # CLI helper script to render and test Friday, Failure, and Sunday email templates
 ├── utils/
 │   ├── __init__.py                       # Shared utils package marker
 │   └── logging_setup.py                  # MultiProcessSafeDailyLogger with 14-day rotation (omu.log, omu_err.log) and console routing
@@ -211,13 +218,13 @@ graph TD
 
 ### 4.1. Boot & Server Initialization Sequence
 1. **Bootstrap & Config Load:** `operation_management_utility.py` executes `bootstrap_helper.bootstrap_and_reexecute_if_needed()`, loads `config/settings.yaml`, and initializes `setup_logging(config)`.
-2. **Stub Verification:** When invoked with `start-grpc-server`, `check_and_generate_stubs(config)` compares the modification timestamps (`mtime`) of `omu.proto` and `sera_standard.proto` against `/ai/assets/protos/operation_management_utility/generated/`. If regenerated, the process replaces itself via `os.execv(sys.executable, [sys.executable, "-u"] + sys.argv)` to load the fresh bytecode cleanly.
+2. **Stub Verification:** When invoked with `start-grpc-server` (or any CLI command), `check_and_generate_stubs(config)` compares the modification timestamps (`mtime`) of `omu.proto` and `sera_standard.proto` against `/ai/assets/protos/operation_management_utility/generated/`. If regenerated during server start, the process replaces itself via `os.execv(sys.executable, [sys.executable, "-u"] + sys.argv)` to load the fresh bytecode cleanly.
 3. **Database Engine Setup:** `initialize_database(config)` creates two distinct SQLAlchemy connection pools (`pool_size=10`, `max_overflow=20`, `pool_pre_ping=True`) bound to `write_dsn` (`:5432`) and `read_dsn` (`:5433`), then calls `init_db()` (`Base.metadata.create_all`).
 4. **Servicer & Vault Token Hydration:** `OmuServiceServicer.__init__` authenticates to Vault via `VaultClient` using AppRole credentials and dynamically fetches regional Rancher bearer tokens (`rancher/{loc}/system/gia_ai`), merging them into `self.config['rancher_clusters']`.
-5. **Background Daemon Launch:** `OmuServiceServicer` starts `SchedulerManager.start_background_tasks()`, spawning the daemon thread `_daily_inspect_daemon`.
+5. **Background Daemon Launch:** `OmuServiceServicer` starts `SchedulerManager.start_background_tasks()`, spawning the daemon thread `_scheduler_daemon`.
 6. **gRPC Binding:** `serve()` registers `OmuServiceServicer`, `SeraStandardServiceImpl`, `HealthServicer`, and Server Reflection onto `0.0.0.0:50104` with `max_workers=10`.
 
-### 4.2. Rolling Patching & Inspection Execution Lifecycle
+### 4.2. Rolling Patching, Inspection & Dynamic Schedule Population Lifecycle
 ```mermaid
 sequenceDiagram
     participant Client as CLI / Scheduler
@@ -226,6 +233,7 @@ sequenceDiagram
     participant Orch as PatchingOrchestrator
     participant Node as Target Host (SSH/API)
     participant NB as NetBox API
+    participant Sched as SchedulerManager
 
     Client->>Service: ExecuteRollingPatch(PatchRequest)
     alt inspect_only == False
@@ -249,7 +257,7 @@ sequenceDiagram
             alt Reboot Required or force_reboot or Uptime > 90d
                 Orch->>Node: pre_reboot_hook() (Leader Step-down / Drain / Stop Services)
                 Orch->>Node: Lazy unmount NFS (bck.gt-t.net) & Reboot
-                Orch->>Node: Poll SSH uptime (up to 300s) & Post-reboot APT check
+                Orch->>Node: Poll SSH uptime (5m VM / 20m Physical) & Post-reboot APT check
             end
             Orch->>Node: Verify Salt Minion (auto-fix master key mismatch)
             Orch->>Node: Component Post-Flight Health & Sync Verification
@@ -261,8 +269,10 @@ sequenceDiagram
     end
     
     Orch->>Node: verify_cluster_health() (Global Quorum / VIP / Workload Check)
-    Service->>DB: complete_patching_run(status="completed")
+    Service->>DB: complete_patching_run(status="completed" or "failed - <node>")
     Service->>NB: InventorySynchronizer.sync("-aif-")
+    Service->>Sched: evaluate_and_populate_schedule(group, location)
+    Sched->>DB: Upsert patching_schedules (30m staggered Saturday slots, SCHEDULED vs VISIBILITY_ONLY)
 ```
 
 ---
@@ -272,11 +282,11 @@ sequenceDiagram
 ### 5.1. Base OS Patching Pre-Flight & Execution Rules (`BasePatchingOrchestrator`)
 * **Trigger Condition & Priority:** Executed sequentially per node inside `perform_os_patching(hostname, ip)` before any package modifications occur.
 * **Step-by-Step Logic:**
-  1. **LVM Root Auto-Resize (Skipped if `inspect_only=True`):** Checks `df -h / /boot /var/log /tmp`. If any mount exceeds **85%** usage, the check fails—except for `/`, where OMU queries `vgs --noheadings -o vg_free --units G vg0S`. If `vg0S` has `>= 12.0G` free (preserving an 8GB reserve), OMU executes `lvextend -L +4G -r /dev/mapper/vg0S-root` up to **3 times** (max 12GB expansion) until usage drops to `<= 85%`.
+  1. **LVM Root Auto-Resize (Skipped if `inspect_only=True` or `device_type=='physical'`):** Checks `df -h / /boot /var/log /tmp`. If any mount exceeds **85%** usage, the check fails—except for `/` on virtual machines (`vm`), where OMU queries `vgs --noheadings -o vg_free --units G vg0S`. If `vg0S` has `>= 12.0G` free (preserving an 8GB reserve), OMU executes `lvextend -L +4G -r /dev/mapper/vg0S-root` up to **3 times** (max 12GB expansion) until usage drops to `<= 85%`. On physical bare-metal servers (where root partitions are already allocated to maximum disk capacity), LVM auto-resize is skipped and the pre-check halts immediately if `/` exceeds **85%**.
   2. **Apt/Dpkg Lock Eradication:** Checks `fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock`. If locked, waits 10s per attempt for 12 attempts (120s total). On the 12th attempt, inspects holding PIDs via `ps -o args=,etimes= -p {pid}`. If the process is an `apt`/`dpkg` routine or its elapsed time (`etimes`) exceeds **3600 seconds (1 hour)**, OMU forcibly kills the process tree (`kill -9`, `pkill -9 -f`) and repairs state via `dpkg --configure -a`. If locked by an unknown critical process under 1 hour old, pre-flight aborts.
   3. **Read-Only Filesystem Check (Skipped if `inspect_only=True`):** Runs `grep ' ro,' /proc/mounts | grep -v loop`. Halts immediately if any read-only mount is detected.
   4. **In-Place Upgrade Suppression:** Creates a temporary `/usr/sbin/policy-rc.d` returning `exit 101` alongside `DEBIAN_FRONTEND=noninteractive`, `NEEDRESTART_MODE=a`, `NEEDRESTART_SUSPEND=1`, and `UCF_FORCE_CONFFOLD=1` so `apt-get dist-upgrade` never restarts stateful daemons mid-transaction before the orchestrator's `pre_reboot_hook` runs. If `/etc/apt/sources.list.d/runner_gitlab-runner.list` exists, refreshes its GPG key prior to `apt-get update || true`.
-  5. **Reboot Decision Matrix:** A node reboots if `force_reboot=True`, `upgraded_count > 0`, `/var/run/reboot-required` exists, or `uptime > 90 days` (`7,776,000` seconds). Otherwise, `skip_reboot=True`.
+  5. **Reboot Decision Matrix & Hardware-Aware Polling:** A node reboots if `force_reboot=True`, `upgraded_count > 0`, `/var/run/reboot-required` exists, or `uptime > 90 days` (`7,776,000` seconds). Otherwise, `skip_reboot=True`. Virtual machines sleep `10s` and poll SSH for up to `5 minutes` (`60 * 5s`), whereas physical bare-metal servers sleep `30s` and poll SSH for up to `20 minutes` (`240 * 5s`) to accommodate hardware BIOS/POST initialization.
   6. **NFS Lazy Unmount:** Prior to `reboot`, inspects `/proc/mounts` for `bck.gt-t.net` and runs `umount -l` to prevent systemd shutdown hangs.
   7. **Salt Minion Self-Healing:** Post-reboot, executes `salt-call test.ping`. If output contains `"Invalid master key"` or `"master key has changed"`, moves `/etc/salt/pki/minion/minion_master.pub` to `minion_master.pub_old`, restarts `salt-minion`, and re-verifies.
 
@@ -291,11 +301,25 @@ sequenceDiagram
 | **Vault** | `aif_vlt` | Non-leader sites first, leader site last. Within site: `FOLLOWER` (`standby=true`) $\rightarrow$ `LEADER`. | If `LEADER`, stops `vault` via systemd (if VM) or calls `PUT /v1/sys/step-down` with `X-Vault-Token`. | Polls `https://{ip}:8200/v1/sys/health` (300s) for `RUNNING` (unsealed & initialized). Performs a live KV v2 read test on `syseng/syseng_ansible`. |
 | **HAProxy** | `aif_ha` | Sorted alphabetically by `hostname`. | Pre-flight requires both `haproxy` and `keepalived` active. Stops `keepalived`, sleeps 5s, verifies `ip -br a` dropped all VIPs, and verifies site peer nodes picked up every dropped VIP before stopping `haproxy`. | Polls `haproxy` and `keepalived` active (150s). Global check waits 15s for VRRP preemption and verifies every node holds its exact `state MASTER` VIPs. |
 | **Rancher** | `aif_rancher` | Sorted by `(site, hostname)`. | Pre-flight verifies `/v3/clusters` reachability, checks container `RestartPolicy` (`unless-stopped`/`always`), and logs TLS cert `notAfter` date. Stops `docker` daemon gracefully to flush embedded K3s etcd state. | Waits for `docker` active (60s), then polls Rancher API up to 600s (`60 * 10s`) until all downstream managed clusters report `Ready == True`. |
-| **K8s (RKE2)** | `aif_app_*`, `aif_gpu_*` | Workers: sorted by `(site, hostname)`. Masters: queries `rke2-etcd` lease in `kube-system`; `FOLLOWER` masters first, `LEADER` master last per site. | **Cross-Site Keycloak Gate:** Before starting a new site, queries `keycloak status --grpc`; if the target site holds the *only* `UP` Keycloak instance globally, halts immediately (unless `inspect_only`). **Capacity Check:** Calculates pool CPU, Memory, and Pod reservations excluding target node; aborts if reservations exceed **90%** of remaining pool capacity. Enables `rke2-server`/`rke2-agent`, then runs `kubectl cordon` and `kubectl drain --ignore-daemonsets --delete-emptydir-data --force --grace-period=60`. | Polls `kubectl get node` for `Ready == True` (300s). For masters, polls `/healthz/etcd` (180s). Runs `kubectl uncordon`. For masters, polls `kube-system` and `cattle-system` pods on the node (180s) until all non-job pods report `Ready`. Compares pre-patch vs post-patch namespace pod count snapshots. |
+| **K8s (RKE2)** | `aif_app_*`, `aif_gpu_*`, `hal_app_*` | Workers: sorted by `(site, hostname)`. Masters: queries `rke2-etcd` lease in `kube-system`; `FOLLOWER` masters first, `LEADER` master last per site. | **Cross-Site Keycloak Gate (`aif_*` only):** Before starting a new site on `aif_*` groups, queries `keycloak status --grpc`; if the target site holds the *only* `UP` Keycloak instance globally, halts immediately (unless `inspect_only`). **Capacity Check:** Calculates pool CPU, Memory, and Pod reservations excluding target node; aborts if reservations exceed **90%** of remaining pool capacity. Resolves K8s node name (short hostname or FQDN), enables `rke2-server`/`rke2-agent`, then runs `kubectl cordon` and `kubectl drain --ignore-daemonsets --delete-emptydir-data --force --grace-period=60`. | Polls `kubectl get node` for `Ready == True` (300s for VMs, 600s for physical nodes). For masters, polls `/healthz/etcd` (180s). Runs `kubectl uncordon`. For masters, polls `kube-system` and `cattle-system` pods on the node (180s) until all non-job pods report `Ready`. Compares pre-patch vs post-patch namespace pod count snapshots. |
 | **Generic** | `aif_dev`, `aif_air`, `aif_dbutl`, `aif_mon` | Sorted by `(site, hostname)`. | Pre-flight discovers running Docker containers, non-excluded systemd services, and `RUNNING` `supervisord` tasks. Stops `supervisorctl`, discovered systemd units, and `docker`. | Polls up to 60s (`30 * 2s`) for all discovered Docker containers, systemd services, and supervisord tasks to return to running state; issues forced `start`/`restart` commands if any fail to auto-recover. |
 
-### 5.3. State Changes & Terminal Outputs
-* **`PatchingRun.status` Enum Values:** `"running"`, `"completed"`, `"failed - init"`, `"failed - no nodes"`, `"failed - exception"`.
+### 5.3. Autonomous Weekend Patching Scheduler & Drift Evaluation (`SchedulerManager`)
+* **Immediate Post-Inspection Population (`evaluate_and_populate_schedule`):** Right after any group inspection (`inspect_only=True`) or patching run completes, `SchedulerManager` inspects all non-excluded VM/physical nodes in the group and evaluates two drift rules:
+  1. **Kernel Drift:** `pending_updates_list` contains kernel packages (`linux-image`, `linux-headers`, `linux-generic`, `linux-modules`).
+  2. **Patch Age Drift:** `last_patched` is older than `max_patch_age_days` (default `30` days) or `'Never'`.
+* **Staggered 30-Minute Weekend Slots:** Qualifying groups are inserted into `patching_schedules` starting Saturday `01:00 UTC` in 30-minute increments (`01:00`, `01:30`, `02:00`, `02:30`, etc.) in the natural order inspections complete.
+* **Active vs. Visibility-Only ("Blind") Entries:**
+  * Groups/sites where nodes have `auto_patch=True` receive `status="SCHEDULED"` and are executed automatically when their weekend window arrives.
+  * Groups/sites where nodes have `auto_patch=False` receive `status="VISIBILITY_ONLY"`, providing full fleet visibility in `schedule list` and the Friday digest email while skipping automatic execution. Once their scheduled weekend window passes, `SchedulerManager` automatically rolls their `scheduled_for` timestamp forward by `+7 days` to the next weekend.
+* **Strict Single-Flight Execution (`_patching_lock`):** A global threading lock ensures **never more than 1 patching run executes concurrently**. If `aif_psql` takes 40 minutes, the next scheduled group (`01:30 UTC`) waits for the lock to release and starts immediately afterward.
+* **Built-In Email Reporting (`EmailClient`):**
+  * **Friday Pre-Flight Digest (`friday_digest_hour_utc: 14`):** Sends an HTML + plaintext summary of all weekend schedules, clearly separating active `auto_patch=True` groups from visibility-only `auto_patch=False` groups and listing affected VMs.
+  * **Immediate Failure Alert:** Dispatches an alert email immediately if an automated weekend patching run fails, including the failed node, `run_id`, and the last 30 lines of execution logs.
+  * **Sunday Weekend Summary (`sunday_summary_hour_utc: 20`):** Sends a summary of all completed weekend runs (with kernel transitions) and rolled-over visibility schedules.
+
+### 5.4. State Changes & Terminal Outputs
+* **`PatchingRun.status` Enum Values:** `"running"`, `"completed"`, `"failed - <hostname>"`, `"failed - init"`, `"failed - no nodes"`, `"failed - exception"`.
 * **HITL & Learning Loops:** Not applicable for this module. When invoked via gRPC (`ExecuteRollingPatch`), OMU executes autonomously (`auto_confirm=True`) and halts deterministically upon any pre-flight, failover, or post-flight verification failure.
 
 ---
@@ -310,7 +334,7 @@ sequenceDiagram
 
 OMU persists state in PostgreSQL (`sam_admin_prod_db`) using SQLAlchemy declarative models defined in `core/database/models.py`.
 
-### 7.1. Database Schema (`managed_nodes`, `patching_runs`, `node_patch_logs`)
+### 7.1. Database Schema (`managed_nodes`, `patching_runs`, `node_patch_logs`, `patching_schedules`)
 
 | Table Name | Column | Type | Constraints / Defaults | Description |
 | :--- | :--- | :--- | :--- | :--- |
@@ -322,7 +346,8 @@ OMU persists state in PostgreSQL (`sam_admin_prod_db`) using SQLAlchemy declarat
 | | `namespace` | `String(100)` | `NULLABLE` | Kubernetes namespace for `kube` devices (`keycloak`, `vault`). |
 | | `group` | `String(100)` | `NULLABLE` | Logical patching group (e.g., `aif_psql`, `aif_app_k8worker`). |
 | | `strategy` | `String(50)` | `NOT NULL` | Assigned strategy (e.g., `"Patroni Patching"`, `"Generic Patching"`). |
-| | `is_excluded` | `Boolean` | `default=False` | Automatically `True` for `aif_vs` and `kube` device types. |
+| | `is_excluded` | `Boolean` | `default=False` | Automatically `True` for `aif_vs`, `aif_gpu_k8worker`, and `kube` device types. |
+| | `auto_patch` | `Boolean` | `default=False` | Controls whether the node/group is enabled for autonomous weekend execution (`True`) vs visibility-only scheduling (`False`). |
 | | `pending_updates_count` | `Integer` | `NULLABLE` | Count of upgradable APT packages from last inspection. |
 | | `pending_updates_list` | `Text` | `NULLABLE` | Newline-delimited list of pending APT packages. |
 | | `cluster_type` | `String(50)` | `NULLABLE` | `"Global"`, `"Local"`, or `"Single Node"`. |
@@ -332,7 +357,7 @@ OMU persists state in PostgreSQL (`sam_admin_prod_db`) using SQLAlchemy declarat
 | | `health_mode` | `String(50)` | `default="UNKNOWN"` | Polling optimization tag (`"API"`, `"SSH"`, or `"UNKNOWN"`). |
 | **`patching_runs`** | `run_id` | `String(36)` | `PRIMARY KEY` | UUIDv4 identifier for the patching run. |
 | | `group` | `String(100)` | `NOT NULL` | Target patching group name. |
-| | `trigger_source` | `String(100)` | `NOT NULL` | Originator identifier (e.g., `"grpc-cli"`). |
+| | `trigger_source` | `String(100)` | `NOT NULL` | Originator identifier (`"grpc-cli"` or `"scheduler-auto"`). |
 | | `started_at` | `DateTime` | `NOT NULL` | UTC start timestamp. |
 | | `completed_at` | `DateTime` | `NULLABLE` | UTC completion timestamp. |
 | | `status` | `String(50)` | `NOT NULL` | Terminal status string. |
@@ -344,6 +369,17 @@ OMU persists state in PostgreSQL (`sam_admin_prod_db`) using SQLAlchemy declarat
 | | `packages_upgraded` | `Integer` | `NULLABLE` | Total APT packages upgraded during the run. |
 | | `skipped_reboot` | `Boolean` | `default=False` | `True` if reboot was bypassed. |
 | | `raw_execution_log` | `Text` | `NULLABLE` | Complete captured stdout/stderr stream for the node. |
+| **`patching_schedules`** | `schedule_id` | `String(36)` | `PRIMARY KEY` | UUIDv4 identifier for the schedule queue entry. |
+| | `group` | `String(100)` | `NOT NULL` | Target patching group (e.g., `aif_dcs`, `aif_psql`). |
+| | `location` | `String(50)` | `default="ALL"` | Site scope (`"ALL"`, `"SLO"`, `"NYC"`, `"PRG"`, `"DAL"`). |
+| | `component` | `String(50)` | `NOT NULL` | Resolved orchestrator component (`dcs`, `patroni`, `kafka`, etc.). |
+| | `scheduled_for` | `DateTime` | `NOT NULL` | Assigned 30-minute staggered UTC weekend execution slot. |
+| | `status` | `String(50)` | `default="SCHEDULED"` | `"SCHEDULED"`, `"VISIBILITY_ONLY"`, `"RUNNING"`, or `"FAILED"`. |
+| | `auto_patch` | `Boolean` | `default=False` | Mirrors whether automatic execution is enabled for this group/location. |
+| | `trigger_reason` | `Text` | `NULLABLE` | Summary of drift criteria (`Kernel update`, `Age > 30d`, node counts). |
+| | `affected_nodes` | `Text` | `NULLABLE` | Comma-separated list of hostnames requiring patching. |
+| | `last_run_id` | `String(36)` | `NULLABLE` | Most recent `PatchingRun.run_id` associated with this schedule. |
+| | `created_at` / `updated_at` | `DateTime` | `NOT NULL` | Creation and last modification UTC timestamps. |
 
 ### 7.2. Local Filesystem State & Cache
 - **Offline Inventory Cache (`discovery/inventory.json`):** Caches raw NetBox VM and Device JSON records locally to support offline fleet queries and CLI diagnostic sweeps (`ssh verify --inventory-file`) during NetBox API maintenance or network partitions.
@@ -362,12 +398,13 @@ OMU exposes two gRPC services on port `50104` with gRPC Server Reflection and st
 ### 8.1. `omu.OmuService` RPC Contracts (`omu.proto`)
 | RPC Method | Request Message | Response Message | Execution Behavior |
 | :--- | :--- | :--- | :--- |
-| `ProvisionService` | `ProvisionRequest` (`component`, `target`, `parameters`) | `ProvisionResponse` (`success`, `message`) | Legacy unimplemented stub (`"Not implemented"`), superseded by CMU. |
-| `ExecuteRollingPatch` | `PatchRequest` (`component`, `group`, `location`, `inspect_only`, `force_reboot`) | `stream PatchResponse` (`run_id`, `success`, `message`) | Spawns background orchestrator thread and streams real-time execution logs via a thread-safe `queue.Queue`. Validates `context.is_active()` before yielding. |
+| `ExecuteRollingPatch` | `PatchRequest` (`component`, `group`, `location`, `inspect_only`, `force_reboot`) | `stream PatchResponse` (`run_id`, `success`, `message`) | Spawns background orchestrator thread under single-flight `_patching_lock`, streams execution logs, syncs NetBox post-run, and immediately evaluates/populates `patching_schedules`. |
 | `IntrospectFleet` | `IntrospectRequest` (`component`, `location`) | `IntrospectResponse` (`success`, `report_json`) | Synchronously audits the requested fleet component using `ThreadPoolExecutor` and returns a serialized JSON report containing `health_mode`, `nodes`, and `vips`. |
-| `SyncInventory` | `SyncRequest` (`query`) | `SyncResponse` (`success`, `message`, `nodes_synced`) | Pulls VMs matching `query` (default `"-aif-"`) from NetBox and discovers Kubernetes workloads (`keycloak`, `vault`) via Rancher API, upserting `managed_nodes`. |
-| `GetInventorySummary` | `SummaryRequest` (`include_details`, `group`, `strategy`) | `SummaryResponse` (`total_nodes`, `patched_today`, `pending_patch`, `pending_nodes`) | Aggregates fleet patching completion metrics (excluding `is_excluded=True` and `device_type='kube'`) and returns detailed node metadata. |
-| `ModifyNode` | `ModifyNodeRequest` (`hostname`, `group`, `strategy`, `is_excluded`, `health_mode`) | `ModifyNodeResponse` (`success`, `message`, `nodes_updated`) | Updates patching strategy, exclusion flag, or `health_mode` (`API`/`SSH`/`UNKNOWN`) for a single node or entire group. |
+| `SyncInventory` | `SyncRequest` (`query`) | `SyncResponse` (`success`, `message`, `nodes_synced`) | Pulls VMs and physical devices matching `query` (default `"-aif-"`) from NetBox and discovers Kubernetes workloads (`keycloak`, `vault`) via Rancher API, upserting `managed_nodes`. |
+| `GetInventorySummary` | `SummaryRequest` (`include_details`, `group`, `strategy`, `device_type`) | `SummaryResponse` (`total_nodes`, `patched_today`, `pending_patch`, `pending_nodes`) | Aggregates fleet patching completion metrics (excluding `is_excluded=True` and `device_type='kube'`) and returns detailed node metadata including `auto_patch`. |
+| `ModifyNode` | `ModifyNodeRequest` (`hostname`, `group`, `location`, `strategy`, `is_excluded`, `health_mode`, `auto_patch`) | `ModifyNodeResponse` (`success`, `message`, `nodes_updated`) | Updates patching strategy, exclusion flag, `auto_patch` status, or `health_mode` (`API`/`SSH`/`UNKNOWN`) for a single node, site, or entire group, re-evaluating `patching_schedules` when `auto_patch` or `is_excluded` changes. |
+| `GetSchedules` | `GetSchedulesRequest` (`group`, `location`) | `GetSchedulesResponse` (`success`, `schedules`) | Queries `patching_schedules` ordered by `scheduled_for ASC` and returns all active and visibility-only weekend slots. |
+| `ManageSchedule` | `ManageScheduleRequest` (`action`, `group`, `location`, `scheduled_for`, `auto_patch`, `email_type`) | `ManageScheduleResponse` (`success`, `message`, `affected_count`) | Executes schedule management actions: `"evaluate"` (recomputes drift & slots), `"set"` (adapts window time and/or toggles `auto_patch`), `"delete"` (removes entry), or `"send_email"` (dispatches `"friday"`, `"sunday"`, or `"failure"` email). |
 | `GetAuditRuns` | `AuditRunsRequest` (`limit`) | `AuditRunsResponse` (`runs`) | Returns the most recent `limit` (default 50) `PatchingRun` records ordered by `started_at DESC`. |
 | `GetAuditLogs` | `AuditLogsRequest` (`run_id`) | `AuditLogsResponse` (`logs`) | Returns all `NodePatchLog` entries (including `raw_execution_log`) for a specific `run_id`. |
 | `GetHAProxyConfig` | `GetHAProxyConfigRequest` (`group`, `location`) | `GetHAProxyConfigResponse` (`success`, `configs`) | Read-only dependency inspection: concurrently fetches `/etc/haproxy/haproxy.cfg` across all HAProxy nodes in `group` via SSH strictly to verify Keepalived VRRP topology and VIP peer takeovers prior to node reboots. |
@@ -387,15 +424,15 @@ OMU implements the universal SERA standard contract (`sera.standard.v1.SeraAppSe
 
 | Worker / Thread Name | Trigger & Schedule | Concurrency & Locking | Operational Logic & Retry Policy |
 | :--- | :--- | :--- | :--- |
-| **`SchedulerManager._daily_inspect_daemon`** | Daemon thread started on gRPC server boot. Sleeps `300s` initially, then loops every `3600s` (1 hour). | Single background daemon thread per server instance. | Queries `managed_nodes` for all distinct groups with a defined `strategy != "Not Defined"`. Filters out `device_type == 'KUBE'`. If any node in a group has `last_inspected == None` or `(datetime.utcnow() - n.last_inspected).total_seconds() > 86400` (24 hours), invokes `OmuServiceServicer.ExecuteRollingPatch` internally (`inspect_only=True`, `context=None`). |
-| **`ExecuteRollingPatch.run_patching`** | Spawned on-demand per `ExecuteRollingPatch` gRPC call. | 1 worker thread per active gRPC stream; communicates with gRPC generator thread via `queue.Queue`. | Runs `orchestrator.run(auto_confirm=True)`. Regardless of whether the client disconnects (`not context.is_active()`), the background thread continues to completion, updates `PatchingRun.status`, commits audit logs, and triggers `InventorySynchronizer.sync("-aif-")`. |
+| **`SchedulerManager._scheduler_daemon`** | Daemon thread started on gRPC server boot. Sleeps `300s` initially, then loops every `600s` (10 minutes). | Single background daemon thread per server instance; enforces `self._patching_lock` for single-flight patching. | 1. **Daily Inspections:** Sweeps groups where any node has `last_inspected == None` or `> 24h` (`inspect_only=True`).<br/>2. **Dynamic Schedule Population:** Evaluates kernel updates & >30-day patch age post-inspect and assigns 30-min staggered Saturday slots (`01:00`, `01:30`, ...) in `patching_schedules`.<br/>3. **Weekend Execution & Rollover:** Runs due `auto_patch=True` schedules sequentially (1 at a time) and rolls past-due `auto_patch=False` visibility entries forward by `+7d`.<br/>4. **Email Reporting:** Dispatches Friday digest, immediate failure alerts, and Sunday summary emails via `EmailClient`. |
+| **`ExecuteRollingPatch.run_patching`** | Spawned on-demand per `ExecuteRollingPatch` gRPC call. | Acquires `SchedulerManager._patching_lock` when `inspect_only=False` so manual and scheduled patches never run concurrently. | Runs `orchestrator.run(auto_confirm=True)`. Regardless of whether the client disconnects (`not context.is_active()`), the background thread continues to completion, updates `PatchingRun.status`, syncs NetBox, and refreshes `patching_schedules`. |
 | **`BaseIntrospector._run_concurrent_checks`** | Invoked during `IntrospectFleet` and `GetHAProxyConfig`. | `ThreadPoolExecutor` (`max_workers=5` to `15` depending on component). | Executes non-blocking parallel SSH, HTTP, or SQL health checks across all nodes in a component group. |
 
 ---
 
 ## 11. CLI, Tooling & Testing 💻
 
-The OMU CLI (`operation_management_utility.py`) is built on `click` using a custom `NestedHelpGroup` that renders all top-level groups and nested subcommands in a single `--help` view. All status, summary, and audit commands support `--grpc` to emit raw JSON payloads.
+The OMU CLI (`operation_management_utility.py`) is built on `click` using a custom `NestedHelpGroup` that renders all top-level groups and nested subcommands in a single `--help` view. All status, summary, schedule, and audit commands support `--grpc` to emit raw JSON payloads.
 
 ### 11.1. CLI Command Reference
 
@@ -403,7 +440,8 @@ The OMU CLI (`operation_management_utility.py`) is built on `click` using a cust
 | :--- | :--- | :--- |
 | **Root (`cli`)** | `start-grpc-server`<br/>`init-db [--force]` | Starts the OMU gRPC server on port `50104`.<br/>Initializes (or recreates with `--force`) PostgreSQL tables. |
 | **`module`** | `module info [--grpc]`<br/>`module check-health [--grpc]` | Calls OMU's own `SeraAppService.GetAppInfo` and `GetDeepHealth`. |
-| **`inventory`** | `inventory sync [--query <str>]`<br/>`inventory summary [--group <grp>] [--strategy <strat>] [--grpc]`<br/>`inventory modify [--hostname <h> \| --group <g>] [--strategy <s>] [--exclude true\|false] [--health-mode API\|SSH\|UNKNOWN]`<br/>`inventory updates <hostname>` | Synchronizes NetBox VMs and Rancher K8s workloads into `managed_nodes`.<br/>Aggregates patching completion metrics.<br/>Updates node/group patching strategies and polling modes.<br/>Displays pending updates for a specific node. |
+| **`inventory`** | `inventory sync [--query <str>]`<br/>`inventory summary [--group <grp>] [--strategy <strat>] [--type <t>] [--grpc]`<br/>`inventory modify [--hostname <h> \| --group <g>] [--location <loc>] [--strategy <s>] [--exclude true\|false] [--auto-patch true\|false] [--health-mode API\|SSH\|UNKNOWN]`<br/>`inventory updates <hostname>` | Synchronizes NetBox VMs/Devices and Rancher K8s workloads into `managed_nodes`.<br/>Aggregates patching completion metrics (including `AUTO` column).<br/>Updates node/group strategies, exclusion, `auto_patch`, and polling modes.<br/>Displays pending updates for a specific node. |
+| **`schedule`** | `schedule list [--group <g>] [--location <loc>] [--grpc]`<br/>`schedule evaluate [--group <g>] [--location <loc>]`<br/>`schedule set --group <g> [--location <loc>] [--time "YYYY-MM-DD HH:MM"] [--auto-patch true\|false]`<br/>`schedule remove --group <g> [--location <loc>]`<br/>`schedule email --type <friday\|sunday\|failure> [--group <g>] [--location <loc>]` | Displays the dynamic weekend patching schedule queue.<br/>Evaluates kernel/30-day drift and populates 30-min weekend slots.<br/>Adapts a group's scheduled window time or toggles `auto_patch`.<br/>Removes an entry from `patching_schedules`.<br/>Dispatches on-demand Friday digest, Sunday summary, or failure alert emails. |
 | **`status`** | `status all` | Executes sequential global fleet audits across all 11 component domains. |
 | **Component Audits** | `<component> status [--location <loc>] [--grpc]`<br/>`haproxy config-explorer [--group <grp>] [--location <loc>] [--detailed]` | Audits live topology and health for `patroni`, `valkey`, `kafka`, `qdrant`, `dcs`, `vault`, `haproxy`, `rancher`, `k8s`, `keycloak`, or `generic`. |
 | **Component Patching** | `<component> <inspect\|patch> [--group <grp>] [--location <loc>] [--force-reboot]` | Executes pre-flight inspection (`inspect`) or rolling zero-downtime OS upgrade (`patch`) across target cluster topology. |
@@ -416,6 +454,7 @@ The OMU CLI (`operation_management_utility.py`) is built on `click` using a cust
 # Server & Database Lifecycle
 python3 operation_management_utility.py start-grpc-server
 python3 operation_management_utility.py init-db [--force]
+python3 scripts/alter_table.py
 
 # SERA Standard Module Introspection
 python3 operation_management_utility.py module info [--grpc]
@@ -423,9 +462,16 @@ python3 operation_management_utility.py module check-health [--grpc]
 
 # Inventory & Metadata Management
 python3 operation_management_utility.py inventory sync [--query "-aif-"]
-python3 operation_management_utility.py inventory summary [--group <grp>] [--strategy <strat>] [--grpc]
-python3 operation_management_utility.py inventory modify [--hostname <host> | --group <grp>] [--strategy <strat>] [--exclude true|false] [--health-mode API|SSH|UNKNOWN]
+python3 operation_management_utility.py inventory summary [--group <grp>] [--strategy <strat>] [--type <physical|vm|kube>] [--grpc]
+python3 operation_management_utility.py inventory modify [--hostname <host> | --group <grp>] [--location <loc>] [--strategy <strat>] [--exclude true|false] [--auto-patch true|false] [--health-mode API|SSH|UNKNOWN]
 python3 operation_management_utility.py inventory updates <hostname>
+
+# Autonomous Weekend Patching Schedule Management
+python3 operation_management_utility.py schedule list [--group <grp>] [--location <loc>] [--grpc]
+python3 operation_management_utility.py schedule evaluate [--group <grp>] [--location <loc>]
+python3 operation_management_utility.py schedule set --group aif_dcs [--location slo] [--auto-patch true] [--time "2026-10-31 01:00"]
+python3 operation_management_utility.py schedule remove --group <grp> [--location <loc>]
+python3 operation_management_utility.py schedule email --type <friday|sunday|failure>
 
 # Global & Component Status Audits
 python3 operation_management_utility.py status all
@@ -446,7 +492,7 @@ python3 operation_management_utility.py generic status [--group <grp>] [--grpc]
 python3 operation_management_utility.py <patroni|valkey|kafka|qdrant|dcs|haproxy> <inspect|patch> [--group <grp>] [--location <loc>] [--force-reboot]
 python3 operation_management_utility.py vault <inspect|patch> [--force-reboot]
 python3 operation_management_utility.py rancher <inspect|patch> [--location <loc>] [--force-reboot]
-python3 operation_management_utility.py k8s <inspect|patch> --group <aif_app_k8master|aif_app_k8worker|aif_gpu_k8master|aif_gpu_k8worker> [--location <loc>] [--force-reboot]
+python3 operation_management_utility.py k8s <inspect|patch> --group <aif_app_k8master|aif_app_k8worker|aif_gpu_k8master|aif_gpu_k8worker|hal_app_k8master|hal_app_k8worker> [--location <loc>] [--force-reboot]
 python3 operation_management_utility.py generic <inspect|patch> [--group <grp> | --all] [--location <loc>] [--force-reboot]
 
 # Execution Auditing & SSH Diagnostics
@@ -474,11 +520,12 @@ python3 operation_management_utility.py ssh execute --cmd "<command>" [--group a
 | `database.read_dsn` | Local PostgreSQL RO connection string via HAProxy Read VIP. | `"postgresql://...@slo-aif-ha.slo.gt-t.net:5433/sam_admin_prod_db"` |
 | `external_services.netbox.url` / `verify_ssl` | NetBox API endpoint and TLS verification toggle. | `"https://netbox.gt-t.net"` / `false` |
 | `external_services.vault.url` / `role_id` / `secret_id` | HashiCorp Vault endpoint and AppRole credentials. | `"https://vault-aif.gt-t.net:8200"` |
-| `rancher_clusters.<prg|slo|nyc>` | Regional Rancher URLs and target APP (`-aif-clu01`) and GPU (`-aif-nvclu01`) cluster names. | `prg`, `slo`, `nyc` blocks |
+| `rancher_clusters.<prg|slo|nyc>` | Regional Rancher URLs and target APP (`-aif-clu01`), GPU (`-aif-nvclu01`), and HAL (`-hal-clu01`) cluster names. | `prg`, `slo`, `nyc` blocks |
 | `haproxy.hosts` / `services` / `db_write` | Regional HAProxy VIP FQDNs and target ports (`6334`, `6379`, `5433`, `5432`) for reachability checks. | `slo`, `nyc`, `prg` VIPs |
 | `keycloak.auth_url` / `client_id` / `client_secret` | OIDC token endpoint and test client credentials for measuring authentication latency. | `"https://keycloak-aif.gt-t.net/realms/aif-llm/..."` |
-| `vault_paths.*` | KV v2 secret paths for `qdrant_admin`, `valkey_admin`, `psql_admin`, `syseng_ansible`, and `rancher_admin`. | `"secret/..."` paths |
-| `inventory.patching_strategies` | Maps `aif_*` group names to their human-readable strategy names during NetBox sync. | 15 group-to-strategy mappings |
+| `vault_paths.*` | KV v2 secret paths for `netbox`, `qdrant_admin`, `valkey_admin`, `psql_admin`, `syseng_ansible`, and `rancher_admin`. | `"secret/..."` paths |
+| `inventory.patching_strategies` | Maps `aif_*` and `hal_*` group names to their human-readable strategy names during NetBox sync. | 17 group-to-strategy mappings |
+| `scheduler.*` | Controls drift threshold (`max_patch_age_days: 30`), weekend slot interval (`slot_interval_minutes: 30`), Saturday start (`weekend_start_hour_utc: 1`), and `email` SMTP settings (`smtp.bigip.gtt.net`). | `30d`, `30m` slots, Sat `01:00 UTC` |
 
 ### 12.2. Security, Credential Sanitization & Privilege Isolation
 * **In-Memory SSH Key Handling:** `VaultClient.get_syseng_credentials()` fetches the `openssh_private_key` and `password` from `secret/syseng/syseng_ansible` directly into memory, loading it into Paramiko via `io.StringIO` (supporting RSA and Ed25519 keys) without ever writing private keys to disk.
@@ -505,22 +552,24 @@ python3 operation_management_utility.py ssh execute --cmd "<command>" [--group a
 
 The following capabilities define the future architectural state of OMU, extending its role as the definitive control plane for zero-downtime fleet patching and resolving technical debt.
 
-### 14.1. Autonomous Patching Scheduler & Kernel Drift Evaluator
-Expand OMU's package management capabilities to act as a fully autonomous patching scheduler. While the `SchedulerManager` daemon currently sweeps the fleet daily for inspections, OMU will eventually continuously query localized OS kernel versions from the fleet, alongside unified repository metadata. It will evaluate patch drift and automatically schedule patching runs if:
-* The running kernel version does not match the latest approved repository stable kernel.
-* The elapsed time since the node's last successful patch exceeds 30 days.
+### 14.1. Protocol Buffer & Database Namespace Alignment (`omu_*`)
+Because SAM administrative utilities share the `sam_admin_prod_db` PostgreSQL database, standardize OMU's SQLAlchemy tables with a strict `omu_` prefix (`omu_managed_nodes`, `omu_patching_runs`, `omu_node_patch_logs`, `omu_patching_schedules`) to guarantee zero namespace collisions and safe schema maintenance across utilities.
 
-OMU will store these schedules in a new `PatchingSchedules` table and execute them autonomously over maintenance windows. SAM will query OMU via gRPC to report these schedules and trigger email notifications via EMA.
-
-### 14.2. Legacy Day-1 Provisioning Tech-Debt Deprecation
-Because all Day-1 logical resource provisioning (PostgreSQL databases/roles, Valkey ACLs/reservations, Keycloak OIDC clients, HAProxy configs/keys, and Vault secrets) is now owned and orchestrated by the **Configuration Management Utility (CMU)**, strip out the leftover `llm-auth` Day-1 provisioning methods and unimplemented gRPC stubs from OMU:
-* Remove `rpc ProvisionService` (`ProvisionRequest` / `ProvisionResponse`) from `grpc_api/protos/omu.proto` and `grpc_api/omu_service.py`.
-* Remove `provision_database_and_role`, `list_databases`, `list_roles`, `list_tables_and_owners`, and `execute_custom_query` from `core/managers/patroni_manager.py` (retaining `get_replication_status` and `ping` for Patroni topology introspection).
-* Remove `provision_app_user`, `inspect_databases_globally`, `reserve_databases_globally`, `check_user_exists`, and `delete_app_user` from `core/managers/valkey_manager.py` (retaining `audit_cluster` and `_get_client` for Valkey introspection and Sentinel failover).
-* Remove `authenticate_admin`, `list_clients`, and `get_client_config` from `core/managers/keycloak_manager.py` (or deprecate the manager entirely since `KeycloakIntrospector` queries Keycloak health and token latency via `RancherManager`).
-
-### 14.3. Protocol Buffer & Database Namespace Alignment (`omu_*`)
-Because SAM administrative utilities share the `sam_admin_prod_db` PostgreSQL database, standardize OMU's SQLAlchemy tables with a strict `omu_` prefix (`omu_managed_nodes`, `omu_patching_runs`, `omu_node_patch_logs`) to guarantee zero namespace collisions and safe schema maintenance across utilities.
-
-### 14.4. Pre-Patch Automated VM Snapshot & Backup Verification
+### 14.2. Pre-Patch Automated VM Snapshot & Backup Verification
 Prior to executing `pre_reboot_hook` and `dist-upgrade` on high-risk virtual machine clusters (Patroni, DCS, Vault), integrate OMU with the virtualization platform API (VMware / Proxmox / NetBox) to automatically trigger an ephemeral snapshot or verify that a backup has succeeded within the last 24 hours before touching the primary stateful nodes.
+
+### 14.3. GPU Worker (`aif_gpu_k8worker`) & NVIDIA `gpu-operator` Orchestration with HMU Integration (`hmu_connector.py`)
+Because GPU worker clusters (`aif_gpu_k8worker`) run with near-100% `nvidia.com/gpu` VRAM reservation across two physical nodes (`wrk01` and `wrk02`), standard Kubernetes pod eviction (`kubectl drain`) cannot reschedule displaced vLLM replicas onto a sibling node without first reducing deployment replica counts. Rather than coupling OMU to CMU for temporary replica scaling, OMU will handle all node cordoning, workload scaling, draining, and driver upgrade state checks directly via `kubectl` / K8s API (`K8sPatchingOrchestrator` & `K8sManager`), while delegating post-patch topology synchronization and synthetic inference validation to the **Health Monitor Utility (HMU)** via a dedicated `core/clients/hmu_connector.py` gRPC client:
+
+1. **Zero-Downtime GPU Worker OS Patching Workflow (Native OMU + `kubectl`):**
+   * **Cordon First (`kubectl cordon <node>`):** Marks the target GPU worker (e.g., `usnyh-aif-wrk02.nyh.gt-t.net`) `SchedulingDisabled` *prior* to scaling down deployments so the Kubernetes controller deterministically terminates pod replicas residing on the cordoned node rather than the active sibling worker.
+   * **Snapshot & Scale Down (`sera-llm` Namespace):** Queries all `Deployment` objects in `sera-llm`, caches their original `.spec.replicas` counts (typically `2`), and scales multi-replica deployments down to `1` (`kubectl scale deployment <name> -n sera-llm --replicas=1`), polling until all model pods on the target node terminate cleanly.
+   * **Drain & Bare-Metal OS Upgrade:** Executes `kubectl drain <node> --ignore-daemonsets --delete-emptydir-data --force`, runs the physical-aware OS `dist-upgrade` and bare-metal reboot sequence (`20m` SSH / `10m` K8s `Ready` timeout), and verifies post-reboot kernel version and `gpu-operator` daemonset pod readiness.
+   * **Uncordon & Restore Scale:** Executes `kubectl uncordon <node>` and restores all `sera-llm` deployments back to their snapshotted replica counts (`--replicas=2`), waiting for pod readiness across both workers.
+2. **Controlled Rolling NVIDIA `gpu-operator` Driver & CUDA Upgrade Workflow (Native OMU + `kubectl`):**
+   * **Single-Node Isolation Dance:** To prevent `gpu-operator` from simultaneously upgrading drivers across both GPU workers, OMU cordons `wrk02`, scales `sera-llm` deployments down to `0` (`--replicas=0`), drains `wrk02`, and then cordons `wrk01` while uncordoning `wrk02`—forcing the `gpu-operator` upgrade controller to target only `wrk02`.
+   * **Driver State & Version Verification:** Polls node label `nvidia.com/gpu-driver-upgrade-state` (waiting for `upgrade-done`) and inspects the `nvidia-driver-daemonset` container image tag in the `gpu-operator` namespace alongside `.status.nodeInfo.kernelVersion`.
+   * **Staged Canary Validation & Second-Node Rollout:** Scales `sera-llm` deployments to `1` on the newly upgraded `wrk02` node and verifies inference health via HMU. Once confirmed healthy, uncordons `wrk01` to let `gpu-operator` upgrade `wrk01`, then restores all `sera-llm` deployments back to `2` replicas.
+3. **Post-Patch Topology Sync & Synthetic Inference Gate (`core/clients/hmu_connector.py`):**
+   * **On-Demand Topology Re-Detection (`RefreshClusterMap`):** Immediately after uncordoning and restoring replica scale, `hmu_connector.py` invokes HMU's `RefreshClusterMap` RPC (`refresh-map` on port `50101`) so physical GPU topology, `nvidia-smi` VRAM allocations, and node cordon states are immediately re-detected and populated in PostgreSQL / SAM UI (`AI Engines` tab) without waiting for HMU's 1-hour background timer.
+   * **End-to-End Inference Verification (`RunHealthChecks`):** Invokes HMU's `RunHealthChecks` RPC (`model-health`) for the target site to execute full synthetic inference checks (`KUBE` / `VM` / `F5` readiness, `/v1/models` verification, and 1-token completions/embeddings probes). OMU asserts `engine_status == "OK"` with zero degraded pods before completing the node or advancing to the next worker.

@@ -4,8 +4,8 @@
 **Category:** (AM) Admin Module  
 **Name:** Sera Admin Module  
 **Acronym:** SAM  
-**Version:** 0.7.2  
-**Date:** 2026-10-22  
+**Version:** 0.7.4  
+**Date:** 2026-10-27  
 **Author:** Martin Kecka & Gemini AI  
 **Status:** Active  
 
@@ -26,7 +26,7 @@ Its primary operational capabilities include:
 - **Single-Pane Observability & Hardware Telemetry:** Aggregating real-time NVIDIA DCGM GPU metrics, node OS telemetry, vLLM engine states, and 3-layer network routing across PRG, SLO, and NYC via HMU.
 - **Autonomous SRE Reasoning & Incident Triage:** Continuous 60s rule evaluation using a dedicated Gemma-4-31B cognitive engine to deduce root causes and prescribe actionable remediation for hardware faults, traffic saturation, zombie models, and pod degradation.
 - **Application Portfolio & GitOps Orchestration:** Authoritative ecosystem registry, multi-service dependency mapping, unified changelog tracking, and automated GitOps commit/rollback workflows via AMU.
-- **Fleet-Wide Stateful Infrastructure Introspection:** Real-time cluster health, kernel auditing, and pending OS update tracking across Patroni, Valkey, Kafka, Qdrant, DCS/etcd, Vault, and Kubernetes via OMU.
+- **Fleet-Wide Stateful Infrastructure Introspection & Autonomous Patching Governance:** Real-time cluster health, kernel auditing, pending OS update tracking, autonomous weekend patching schedule management, and per-run execution audit logs across Patroni, Valkey, Kafka, Qdrant, DCS/etcd, Vault, and Kubernetes via OMU.
 - **Identity Lifecycle, AI Model & LoRA Governance:** Streamlined provisioning and auditing of Keycloak OIDC confidential clients and native HAProxy API keys (paired with 24h client prompt inspection and monthly-grouped daily usage audits), alongside declarative multi-cluster AI model deployment, GitLab vs. Kubernetes drift verification, Kustomize GPU overlay editing, and LoRA adapter repository/rollout orchestration via CMU.
 - **Knowledge Base & RAG Pipeline Quality Assurance:** Deep hierarchical space browsing, chunk boundary inspection, synthesized Q&A analysis, and vector store validation via DIU.
 - **Combinatorial Endpoint Benchmarking & ROI Cost Tracking:** Automated load testing across concurrency steps and financial token usage analytics against commercial frontier models (GPT-5, Claude Opus, Gemini Pro).
@@ -121,7 +121,7 @@ graph TD
 ### 2.3. Active Downstream Utility Modules
 - **HMU (Health Monitor Utility - Port `50101`):** Interfaces with Rancher Kubernetes APIs, Prometheus TSDB, vLLM, and NVIDIA Triton Inference Servers to provide physical GPU/OS telemetry, 3-layer routing checks (F5, VM HAProxy, Kube HAProxy), combinatorial load-testing benchmarks, and token/prompt payload analytics.
 - **AMU (Application Management Utility - Port `50102`):** Manages the Application Registry via the `sera_standard.proto` contract. Performs deep health aggregation, dependency boundary mapping, changelog unification, GitOps repository management, and AI Act compliance inventory tracking.
-- **OMU (Operation Management Utility - Port `50104`):** Performs stateful fleet introspection across core infrastructure clusters (Patroni/PostgreSQL, Qdrant, HAProxy/Keepalived, DCS Consul/Etcd, Valkey, Kafka, Vault, Keycloak, Rancher/K8s, and Generic nodes) alongside OS kernel and APT package auditing.
+- **OMU (Operation Management Utility - Port `50104`):** Performs stateful fleet introspection across core infrastructure clusters (Patroni/PostgreSQL, Qdrant, HAProxy/Keepalived, DCS Consul/Etcd, Valkey, Kafka, Vault, Keycloak, Rancher/K8s, and Generic nodes) alongside OS kernel auditing, APT package tracking, autonomous weekend patching schedule orchestration, and per-run execution auditing.
 - **CMU (Configuration Management Utility - Port `50105`):** Manages enterprise authentication identities across Keycloak (`aif-llm` realm) and native HAProxy API keys, coordinates secret storage in HashiCorp Vault, audits daily request vs. ping volumes, and orchestrates multi-cluster vLLM/NIM model deployments, GitLab manifest/Kustomize overlay editing, drift verification, and LoRA adapter weight distribution.
 - **DIU (Data Inspector Utility - Port `50109`):** Queries the SERA semantic knowledge base to expose Confluence space hierarchies, document chunk boundaries, HyDE generated questions, multi-pass summaries, vision metadata, and structured tables.
 
@@ -197,7 +197,7 @@ graph TD
 │       ├── events.py                                        # Endpoints for event timeline pagination, deletion, and fast verify-resolve
 │       ├── external_diu.py                                  # External HATEOAS proxy API and custom Swagger UI for DIU
 │       ├── hmu.py                                           # Endpoints for AI engines, GPU/node history, prompts, and cost stats
-│       ├── omu.py                                           # Endpoints for fleet introspection, patching inventory, and audit logs
+│       ├── omu.py                                           # Endpoints for fleet introspection, patching inventory, schedules, and audit logs
 │       └── users.py                                         # Endpoint for current user profile and RBAC permissions
 ├── scripts/                        # One-off or maintenance scripts (e.g., data migration, bulk reprocessing).
 ├── static/
@@ -225,7 +225,7 @@ graph TD
 │       │   ├── diu/                                         # DIU UI components (Knowledge Tree, Reading/Investigation views, Stats)
 │       │   ├── documentation/                               # Documentation accordion and unified ChangelogViewer
 │       │   ├── hmu/                                         # HMU UI components (Engines, Topology, Traffic, Events, Benchmarks, Cost, Prompts) and dialogs
-│       │   └── omu/                                         # OMU UI components (Patroni, Kafka, Valkey, Qdrant, DCS, HAProxy, Vault, K8s, Keycloak, Generic cards) and dialogs
+│       │   └── omu/                                         # OMU UI components (OperationsDashboard, PatchingScheduleWidget, cluster cards) and dialogs
 │       ├── pages/                                           # Top-level route wrapper pages (HMU, AMU, OMU, CMU, DIU, Docs)
 │       └── services/                                        # Frontend fetch API clients (hmu, amu, omu, cmu, diu, docs, diagnostic)
 └── utils/
@@ -299,7 +299,7 @@ When an operator initiates a benchmark via `POST /api/benchmarks/run`:
 ### 5.4. HITL & Operator Override Workflows
 - **Fast Verify & Resolve (`POST /api/events/timeline/{incident_id}/verify-resolve`):** Operators can manually resolve an `ACTIVE` incident before its 60-minute cooldown expires (e.g., after restarting a DCGM exporter pod to clear a cached XID error). SAM enforces a strict 120-second guard: if `(now - last_seen_at).total_seconds() < 120`, the request is rejected with `HTTP 409 Conflict`, instructing the operator to wait up to 2 minutes for the 60s telemetry daemon cache to clear and prove the anomaly is truly gone.
 - **Force AI Re-Analysis (`POST /api/diagnostics/analyze`):** Operators can click "Reanalyze" on any alarm (or "Force AI Analysis on Snapshot" on informational events) with `force_reanalyze=True` to bypass cached analyses and re-run the LLM against the stored context snapshot.
-- **GitOps Auto-Sync Holdoff & Manual Commit (`POST /api/amu/apps/{acronym}/push`):** For applications with `is_managed=True`, `GitOpsService.auto_sync_app()` checks `last_modified_uncommitted_timestamp`. If uncommitted files were modified less than 3600 seconds (1 hour) ago, auto-push is skipped to prevent committing while a developer is actively editing code. Additionally, if the top changelog version tag (e.g., `[v0.7.2]`) is already present in `latest_commit_message`, auto-push is skipped to prevent duplicate commits. Operators with `can_push_amu` permissions can trigger an immediate manual push or rollback via the UI.
+- **GitOps Auto-Sync Holdoff & Manual Commit (`POST /api/amu/apps/{acronym}/push`):** For applications with `is_managed=True`, `GitOpsService.auto_sync_app()` checks `last_modified_uncommitted_timestamp`. If uncommitted files were modified less than 3600 seconds (1 hour) ago, auto-push is skipped to prevent committing while a developer is actively editing code. Additionally, if the top changelog version tag (e.g., `[v0.7.4]`) is already present in `latest_commit_message`, auto-push is skipped to prevent duplicate commits. Operators with `can_push_amu` permissions can trigger an immediate manual push or rollback via the UI.
 - **Identity, Secret, Model & LoRA Administration Overrides (`can_manage_cmu_secrets`, `can_manage_cmu_models`, `can_manage_cmu_lora`):** Viewing client secrets (`GET /api/cmu/identity/{client_id}/secret`), executing Day-1 identity provisioning/teardown, editing GitLab model manifests/Kustomize overlays (`PUT /api/cmu/models/{model_name}/manifests`), rolling out models (`POST /api/cmu/models/deploy`), and uploading/deploying/disabling LoRA adapters require the administrative RBAC claims. Non-admin users are restricted to read-only inspection of sanitized Vault metadata, model topology, drift verification, and LoRA inventory.
 - **Selective App Health & Portfolio Sync (`POST /api/amu/health/{acronym}/refresh`):** Operators can manually trigger deep health re-evaluation for a single service, which immediately evicts and refreshes the targeted app in `AMU_TOPOLOGY_HEALTH` cache without waiting for the full ecosystem poll cycle.
 
@@ -420,6 +420,9 @@ Implements the universal SERA ecosystem standard contract (`sera.standard.v1.Ser
   - `GET /external-agents`, `POST /external-agents`, `PUT /external-agents/{acronym}`, `DELETE /external-agents/{acronym}`.
 - **OMU (`/api/omu`):**
   - `GET /inventory`: Supports filtering by `group` and `strategy`, merging partial refreshes into global cache via `CacheService.merge_omu_inventory()`.
+  - `POST /inventory/modify`: Modifies node/group attributes (`strategy`, `is_excluded`, `health_mode`, `auto_patch`, `location`) and invalidates `OMU_INVENTORY`.
+  - `GET /schedules`: Retrieves active and visibility-only autonomous patching schedules (`GetSchedules` gRPC).
+  - `POST /schedules`: Executes schedule management actions (`evaluate`, `set`, `delete`, `send_email`) via `ManageSchedule` gRPC and invalidates `OMU_INVENTORY`.
   - `GET /introspect/{component}`, `GET /audit/runs`, `GET /audit/logs/{run_id}`.
 - **CMU (`/api/cmu`):**
   - *Identity & Vault:*
@@ -466,9 +469,9 @@ The `SAM-WebUI` is a React 18 SPA built with Vite, Material-UI (MUI v5), TanStac
    - **Ecosystem Topology (`AmuTopologyWidget.jsx`):** Categorized table of registered microservices showing service health, reverse-mapped Consumers, Modules (gRPC connectors), Infra (Postgres, Valkey, Chroma/Qdrant), LLMs, Internal/External APIs, versions, ports, one-click GitOps Push, and `AmuAppDialog.jsx` (Changelog, out-of-date Docs detector, and GitOps commit history/rollback).
    - **Ecosystem Releases (`AmuReleasesWidget.jsx`):** Weekly paginated velocity tracker with category counters, application/author filters, and `[NEEDS_DOCS]` badge indicators.
    - **AI Agent Inventory (`AmuAgentInventoryWidget.jsx`):** Inline-editable compliance matrix for internal agents, support agents, and external/unmanaged agents (tracking Autonomy Level, Ecosystem, Business Unit, Lifecycle Stage, Oversight Model, AI Risk Classification, Business Impact, Data Sensitivity, Decision Influence, and Control Status) with CSV export.
-3. **OMU (`OperationsDashboard.jsx`):**
-   - Categorized accordions (*Databases*, *Brokers & Cache*, *Core Infrastructure*, *Kubernetes Clusters*, *Miscellaneous Workloads*) rendering specialized status cards (`PatroniCard`, `QdrantCard`, `KafkaCard`, `ValkeyCard`, `HaCard`, `DcsCard`, `VaultCard`, `KeycloakCard`, `K8sCard`, `GenericCard`).
-   - Displays cluster health, kernel versions, pending kernel update warnings (`linux-image` / `linux-generic`), and stale inspection alerts (`> 48 hours`). Clicking any card opens `PatchingDetailsDialog.jsx` to inspect historical patching audit runs, raw terminal execution logs, pending APT packages, and Kubernetes pod phase breakdowns (`K8sPodsTab.jsx`).
+3. **OMU (`OperationsDashboard.jsx` - 2 Tabs):**
+   - **Cluster Overview:** Categorized accordions (*Databases*, *Brokers & Cache*, *Core Infrastructure*, *Kubernetes Clusters*, *Miscellaneous Workloads*) rendering specialized status cards (`PatroniCard`, `QdrantCard`, `KafkaCard`, `ValkeyCard`, `HaCard`, `DcsCard`, `VaultCard`, `KeycloakCard`, `K8sCard`, `GenericCard`). Displays cluster health, kernel versions, pending kernel update warnings (`linux-image` / `linux-generic`), and stale inspection alerts (`> 48 hours`). Clicking any card opens `PatchingDetailsDialog.jsx` to inspect historical patching audit runs, raw terminal execution logs, pending APT packages, and Kubernetes pod phase breakdowns (`K8sPodsTab.jsx`).
+   - **Patching & Schedule (`PatchingScheduleWidget.jsx`):** Unified dashboard for OMU's Autonomous Weekend Patching Scheduler and Audit Execution History. Displays queued groups, active auto-patch vs. visibility-only counts, scheduled Saturday UTC windows, inline `auto_patch` toggles, drift reasons, and affected VM count badges with hostname hover tooltips. Includes controls to evaluate fleet drift, override/add schedule slots, delete schedule entries, send Friday Pre-Flight Digest or Sunday Summary emails, and inspect historical patching runs and per-node raw console logs via `RunDetailsDialog`.
 4. **CMU (`ConfigurationDashboard.jsx` - 2 Tabs):**
    - **Identity Management (`IdentityManagerWidget.jsx`):** Dual sortable tables for HAProxy Native Keys and Keycloak Clients (`aif-llm` Realm) (filtering out non-service-account internal clients). Displays live status, Vault metadata (Env, Requestor, Description), Last Usage, and Total Usage.
      - Includes `CreateIdentityDialog.jsx` (streaming NDJSON creation for `dev`, `test`, `stag`, `prod`), `HaproxyIdentityDetailsDialog.jsx`, and `KeycloakIdentityDetailsDialog.jsx`.
@@ -550,7 +553,7 @@ python3 sera_admin_module.py benchmarks run-automated --host http://localhost:78
 
 | Section / Key | Purpose | Default / Production Value |
 | :--- | :--- | :--- |
-| `module_info.acronym` / `version` | Module identifier and semantic version | `"SAM"` / `"0.7.2"` |
+| `module_info.acronym` / `version` | Module identifier and semantic version | `"SAM"` / `"0.7.4"` |
 | `system_services.api.host` / `port` | FastAPI REST server bind address and port | `"0.0.0.0"` / `7890` (`sam-api.service`) |
 | `system_services.grpc.host` / `port` | SERA Standard gRPC bind address, port, and workers | `"0.0.0.0"` / `50103` / `10` (`sam-grpc.service`) |
 | `database.write_dsn` | PostgreSQL Primary HA write connection string | `postgresql://...@slo-aif-hadb.slo.gt-t.net:5432/sam_admin_prod_db` |
@@ -598,7 +601,6 @@ python3 sera_admin_module.py benchmarks run-automated --host http://localhost:78
    - When background daemons encounter an upstream error during AMU topology, HMU cluster map, or CMU Vault polling, they call `redis.refresh_lock()` on the existing cache key to extend its TTL and prevent thundering-herd retries.
    - For OMU components using slow `SSH` or `UNKNOWN` health modes, both the router and frontend (`omuService.getRefetchInterval`) dynamically extend cache TTLs (`360s`) and UI polling intervals (`300,000ms` / 5m) to prevent SSH connection exhaustion.
 3. **Cluster Warning Isolation in Zombie Detection:** Before flagging a `ZOMBIE_MODEL` incident, `DiagnosticService` inspects `traffic_data["warnings"]` and `ingress_data["warnings"]`. Any datacenter experiencing Kubernetes API or HAProxy scrape failures is added to `failing_clusters` and excluded from configuration drift evaluation, preventing false-positive alarms during network partitions.
-4. **LLM Exponential Backoff:** Both `vLLMClient.get_chat_completion()` and `DiagnosticService._get_llm_completion_with_retries()` implement 3-attempt retry loops with exponential backoff ($2^1\text{s}, 2^2\text{s}$), ensuring transient inference timeouts do not drop SRE incident analyses.
 
 ---
 

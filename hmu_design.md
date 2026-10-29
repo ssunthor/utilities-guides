@@ -121,9 +121,6 @@ graph TD
 ├── health_monitor_utility.py            # Main executable entrypoint; configures env vars, loads YAML, initializes logging & CLI
 ├── requirements.txt                     # Python package dependencies (grpcio, protobuf, SQLAlchemy, click, hvac, redis, etc.)
 ├── README.md                            # Repository overview and links to central documentation
-├── test_concurrent.py                   # Standalone concurrency diagnostic script (standard session)
-├── test_concurrent_noproxy.py           # Standalone concurrency diagnostic script (trust_env=False proxy bypass)
-├── test_kube.py                         # Standalone Kubernetes Ingress discovery diagnostic script
 ├── cli/
 │   ├── __init__.py                      # CLI package initializer
 │   ├── hmu_cli.py                       # Root Click group (NestedHelpGroup), stub injection, and start-grpc-server command
@@ -190,11 +187,7 @@ graph TD
 │       └── hmu.proto                    # Protocol Buffers v3 contract defining HealthMonitorUtility service and messages
 ├── prompts/
 │   └── classification_prompts.py        # GENERATOR_PROMPT and EVALUATOR_PROMPT templates for LLM payload categorization
-├── scratch/
-│   ├── test_concurrent_ip.py            # Scratch test for raw IP + Host header concurrent requests
-│   ├── test_curl_concurrent.sh          # Scratch bash script for 45-worker curl latency testing
-│   ├── test_proxy_bypass.py             # Scratch test comparing trust_env=False vs proxy-enabled latency
-│   └── test_shared.py                   # Scratch test for shared requests.Session connection pooling
+├── scripts/                             # Dumping ground for one-time operational, repair, and test scripts (ephemeral, not part of runtime)
 └── utils/
     ├── logging_setup.py                 # MultiProcessSafeDailyLogger (14-day retention) and console/file handler setup
     └── rpc_transaction_logger.py        # JSON transaction logger and retention pruner
