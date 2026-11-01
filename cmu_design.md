@@ -189,6 +189,7 @@ graph TD
 │   └── monitors/
 │       ├── haproxy_audit_monitor.py        # Daemon thread: Hourly HAProxy log scraping and LLMClientUsageMetric DB upsert
 │       └── vault_audit_monitor.py          # Daemon thread: Hourly Vault leader log scraping and VaultAuditMetric DB upsert
+├── scripts/                                # Dumping ground for one-time operational, repair, and test scripts (ephemeral, not part of runtime)
 └── grpc_api/
     ├── __init__.py                         # gRPC API package initializer
     ├── protos/

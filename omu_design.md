@@ -4,8 +4,8 @@
 **Category:** (U) Utility
 **Name:** Operations Management Utility
 **Acronym:** OMU
-**Version:** 0.4.5
-**Date:** 2026-10-27
+**Version:** 0.4.6
+**Date:** 2026-10-31
 **Author:** Martin Kecka & Gemini AI
 **Status:** Active
 
@@ -25,7 +25,7 @@ Its primary operational capabilities include:
 - **Automated Infrastructure Inventory Synchronization:** Bi-directional synchronization between NetBox DCIM/Virtualization APIs, Rancher Kubernetes cluster workloads, and local PostgreSQL `managed_nodes`.
 - **Autonomous Weekend Patching Scheduler & Drift Evaluator:** Dynamic post-inspection evaluation of kernel updates and 30-day patch age across all groups, populating a staggered 30-minute weekend execution queue (`patching_schedules`) with single-flight execution locking, visibility-only auto-rollover for disabled groups, and built-in SMTP email reporting (Friday digest, immediate failure alerts, and Sunday summary).
 - **Keepalived VRRP Topology & Failover Pre-Check:** Read-only inspection of Keepalived VRRP configurations and VIP allocations (`haproxy config-explorer`) strictly to verify peer takeover readiness during load balancer OS maintenance (contrasting with CMU's configuration authoring and deployment ownership).
-- **Execution Auditing & Log Streaming:** Real-time gRPC log streaming via thread-safe queues, with detailed host kernel transition and package upgrade persistence in PostgreSQL (`patching_runs`, `node_patch_logs`) and flat-file fallback.
+- **Execution Auditing & Log Streaming:** Real-time gRPC log streaming via thread-safe queues, with detailed host kernel transition and package upgrade persistence in PostgreSQL (`patching_runs`, `node_patch_logs`), in-progress live node log flushes every 3 seconds, dedicated cluster health verification log isolation (`patching_runs.verification_log`), and flat-file fallback.
 
 ---
 
@@ -197,9 +197,7 @@ graph TD
 │   └── protos/
 │       ├── omu.proto                     # Protobuf contract for omu.OmuService
 │       └── sera_standard.proto           # Master ecosystem Protobuf contract for sera.standard.v1.SeraAppService
-├── scripts/
-│   ├── alter_table.py                    # Database schema migration script adding `auto_patch` to `managed_nodes` and initializing `patching_schedules`
-│   └── test_email.py                     # CLI helper script to render and test Friday, Failure, and Sunday email templates
+├── scripts/                             # Dumping ground for one-time operational, repair, and test scripts (ephemeral, not part of runtime)
 ├── utils/
 │   ├── __init__.py                       # Shared utils package marker
 │   └── logging_setup.py                  # MultiProcessSafeDailyLogger with 14-day rotation (omu.log, omu_err.log) and console routing
@@ -262,6 +260,7 @@ sequenceDiagram
             Orch->>Node: Verify Salt Minion (auto-fix master key mismatch)
             Orch->>Node: Component Post-Flight Health & Sync Verification
             Orch->>NB: PATCH /api/virtualization/virtual-machines/{id}/ (os_build, srv_patching_last)
+            Orch->>DB: upsert_node_patch_log (live in-progress log every 3s)
             Orch->>DB: add_node_patch_log(pre_kernel, post_kernel, pkgs, raw_log)
         end
         Orch-->>Service: Push log lines to Queue
@@ -269,8 +268,9 @@ sequenceDiagram
     end
     
     Orch->>Node: verify_cluster_health() (Global Quorum / VIP / Workload Check)
-    Service->>DB: complete_patching_run(status="completed" or "failed - <node>")
-    Service->>NB: InventorySynchronizer.sync("-aif-")
+    Orch->>DB: save_run_verification_log (verification_log column)
+    Service->>DB: complete_patching_run(status="completed", "warning", or "failed - <node>")
+    Service->>NB: InventorySynchronizer.sync("-aif-, -hal-")
     Service->>Sched: evaluate_and_populate_schedule(group, location)
     Sched->>DB: Upsert patching_schedules (30m staggered Saturday slots, SCHEDULED vs VISIBILITY_ONLY)
 ```
@@ -284,8 +284,8 @@ sequenceDiagram
 * **Step-by-Step Logic:**
   1. **LVM Root Auto-Resize (Skipped if `inspect_only=True` or `device_type=='physical'`):** Checks `df -h / /boot /var/log /tmp`. If any mount exceeds **85%** usage, the check fails—except for `/` on virtual machines (`vm`), where OMU queries `vgs --noheadings -o vg_free --units G vg0S`. If `vg0S` has `>= 12.0G` free (preserving an 8GB reserve), OMU executes `lvextend -L +4G -r /dev/mapper/vg0S-root` up to **3 times** (max 12GB expansion) until usage drops to `<= 85%`. On physical bare-metal servers (where root partitions are already allocated to maximum disk capacity), LVM auto-resize is skipped and the pre-check halts immediately if `/` exceeds **85%**.
   2. **Apt/Dpkg Lock Eradication:** Checks `fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock`. If locked, waits 10s per attempt for 12 attempts (120s total). On the 12th attempt, inspects holding PIDs via `ps -o args=,etimes= -p {pid}`. If the process is an `apt`/`dpkg` routine or its elapsed time (`etimes`) exceeds **3600 seconds (1 hour)**, OMU forcibly kills the process tree (`kill -9`, `pkill -9 -f`) and repairs state via `dpkg --configure -a`. If locked by an unknown critical process under 1 hour old, pre-flight aborts.
-  3. **Read-Only Filesystem Check (Skipped if `inspect_only=True`):** Runs `grep ' ro,' /proc/mounts | grep -v loop`. Halts immediately if any read-only mount is detected.
-  4. **In-Place Upgrade Suppression:** Creates a temporary `/usr/sbin/policy-rc.d` returning `exit 101` alongside `DEBIAN_FRONTEND=noninteractive`, `NEEDRESTART_MODE=a`, `NEEDRESTART_SUSPEND=1`, and `UCF_FORCE_CONFFOLD=1` so `apt-get dist-upgrade` never restarts stateful daemons mid-transaction before the orchestrator's `pre_reboot_hook` runs. If `/etc/apt/sources.list.d/runner_gitlab-runner.list` exists, refreshes its GPG key prior to `apt-get update || true`.
+  3. **Read-Only Filesystem Check (Skipped if `inspect_only=True`):** Runs `grep ' ro,' /proc/mounts | grep -v loop`. Restricts read-only detection strictly to real block devices (`/dev/*`) while excluding loop mounts, preventing false-positive aborts caused by immutable container overlay snapshots (`overlay /tmp/containerd-mount*`). Halts immediately if any read-only host block device is detected.
+  4. **In-Place Upgrade Suppression & Live Audit Logging:** Creates a temporary `/usr/sbin/policy-rc.d` returning `exit 101` alongside `DEBIAN_FRONTEND=noninteractive`, `NEEDRESTART_MODE=a`, `NEEDRESTART_SUSPEND=1`, and `UCF_FORCE_CONFFOLD=1` so `apt-get dist-upgrade` never restarts stateful daemons mid-transaction before the orchestrator's `pre_reboot_hook` runs. If `/etc/apt/sources.list.d/runner_gitlab-runner.list` exists, refreshes its GPG key prior to `apt-get update || true`. Throughout execution, the orchestrator initializes the `node_patch_logs` record as soon as a node starts (`PRE-KERNEL = In Progress`) and flushes live captured output every 3 seconds to PostgreSQL (`SQLWriter.upsert_node_patch_log`), enabling operators to monitor in-flight node progress via `omu audit logs <run_id> --raw`.
   5. **Reboot Decision Matrix & Hardware-Aware Polling:** A node reboots if `force_reboot=True`, `upgraded_count > 0`, `/var/run/reboot-required` exists, or `uptime > 90 days` (`7,776,000` seconds). Otherwise, `skip_reboot=True`. Virtual machines sleep `10s` and poll SSH for up to `5 minutes` (`60 * 5s`), whereas physical bare-metal servers sleep `30s` and poll SSH for up to `20 minutes` (`240 * 5s`) to accommodate hardware BIOS/POST initialization.
   6. **NFS Lazy Unmount:** Prior to `reboot`, inspects `/proc/mounts` for `bck.gt-t.net` and runs `umount -l` to prevent systemd shutdown hangs.
   7. **Salt Minion Self-Healing:** Post-reboot, executes `salt-call test.ping`. If output contains `"Invalid master key"` or `"master key has changed"`, moves `/etc/salt/pki/minion/minion_master.pub` to `minion_master.pub_old`, restarts `salt-minion`, and re-verifies.
@@ -299,9 +299,9 @@ sequenceDiagram
 | **Qdrant** | `aif_qdr` | Priority 1: Nodes in non-leader sites. Priority 2: Followers in leader's site. Priority 3: Raft `Leader`. | Standard OS reboot. | Polls `:6333/healthz` (150s) and `/cluster` (150s) until `status == enabled` and `raft_info.role` is `leader` or `follower`. |
 | **DCS (etcd)** | `aif_dcs` | Queries `:2379/v3/maintenance/status`. `FOLLOWER` nodes first, `LEADER` last. | If `LEADER`, finds a healthy follower, resolves its hex ID via `etcdctl member list`, and runs `etcdctl move-leader <hex_id>`, polling 30s to confirm transfer. | Polls `:2379/health` for `health == true` (60s). |
 | **Vault** | `aif_vlt` | Non-leader sites first, leader site last. Within site: `FOLLOWER` (`standby=true`) $\rightarrow$ `LEADER`. | If `LEADER`, stops `vault` via systemd (if VM) or calls `PUT /v1/sys/step-down` with `X-Vault-Token`. | Polls `https://{ip}:8200/v1/sys/health` (300s) for `RUNNING` (unsealed & initialized). Performs a live KV v2 read test on `syseng/syseng_ansible`. |
-| **HAProxy** | `aif_ha` | Sorted alphabetically by `hostname`. | Pre-flight requires both `haproxy` and `keepalived` active. Stops `keepalived`, sleeps 5s, verifies `ip -br a` dropped all VIPs, and verifies site peer nodes picked up every dropped VIP before stopping `haproxy`. | Polls `haproxy` and `keepalived` active (150s). Global check waits 15s for VRRP preemption and verifies every node holds its exact `state MASTER` VIPs. |
+| **HAProxy** | `aif_ha` | Sorted alphabetically by `hostname`. | Pre-flight requires both `haproxy` and `keepalived` active. Stops `keepalived`, sleeps 5s, verifies `ip -br a` dropped all VIPs, and verifies site peer nodes picked up every dropped VIP before stopping `haproxy`. **Failover Error Recovery:** If `keepalived` or `haproxy` fails to stop or peer takeover check fails, triggers `restore_services()` via `systemctl reset-failed` and `systemctl start keepalived haproxy` to ensure the host is not abandoned in a degraded or split state before halting. | Polls `haproxy` and `keepalived` active (150s). Global check waits 15s for VRRP preemption and verifies every node holds its exact `state MASTER` VIPs. |
 | **Rancher** | `aif_rancher` | Sorted by `(site, hostname)`. | Pre-flight verifies `/v3/clusters` reachability, checks container `RestartPolicy` (`unless-stopped`/`always`), and logs TLS cert `notAfter` date. Stops `docker` daemon gracefully to flush embedded K3s etcd state. | Waits for `docker` active (60s), then polls Rancher API up to 600s (`60 * 10s`) until all downstream managed clusters report `Ready == True`. |
-| **K8s (RKE2)** | `aif_app_*`, `aif_gpu_*`, `hal_app_*` | Workers: sorted by `(site, hostname)`. Masters: queries `rke2-etcd` lease in `kube-system`; `FOLLOWER` masters first, `LEADER` master last per site. | **Cross-Site Keycloak Gate (`aif_*` only):** Before starting a new site on `aif_*` groups, queries `keycloak status --grpc`; if the target site holds the *only* `UP` Keycloak instance globally, halts immediately (unless `inspect_only`). **Capacity Check:** Calculates pool CPU, Memory, and Pod reservations excluding target node; aborts if reservations exceed **90%** of remaining pool capacity. Resolves K8s node name (short hostname or FQDN), enables `rke2-server`/`rke2-agent`, then runs `kubectl cordon` and `kubectl drain --ignore-daemonsets --delete-emptydir-data --force --grace-period=60`. | Polls `kubectl get node` for `Ready == True` (300s for VMs, 600s for physical nodes). For masters, polls `/healthz/etcd` (180s). Runs `kubectl uncordon`. For masters, polls `kube-system` and `cattle-system` pods on the node (180s) until all non-job pods report `Ready`. Compares pre-patch vs post-patch namespace pod count snapshots. |
+| **K8s (RKE2)** | `aif_app_*`, `aif_gpu_*`, `hal_app_*` | Workers: sorted by `(site, hostname)`. Masters: queries `rke2-etcd` lease in `kube-system`; `FOLLOWER` masters first, `LEADER` master last per site. | **Cross-Site Keycloak Gate (`aif_*` only):** Before starting a new site on `aif_*` groups, queries `keycloak status --grpc`; if the target site holds the *only* `UP` Keycloak instance globally, halts immediately (unless `inspect_only`).<br/>**Capacity Check:** Calculates pool CPU, Memory, and Pod reservations excluding target node; aborts if reservations exceed **90%** of remaining pool capacity.<br/>**Dynamic PVC Auto-Expansion & Pre-Drain PDB Deadlock Remediation:** Audits volume capacity of mounted PVCs. If usage exceeds **85%** or if peer pods in a PodDisruptionBudget (`disruptionsAllowed: 0`) are crashing (CrashLoopBackOff) due to volume exhaustion, automatically expands the PVC (< 100Gi: +20% with min +5Gi floor; $\ge$ 100Gi: +10%, rounded up to integer Gi), ensures `allowVolumeExpansion: true` on the StorageClass, restarts crashed pods, and waits up to 120s for PDB disruptions to be allowed.<br/>**PDB Disruptions Verification:** Inspects all PDBs protecting pods on the node; if any allow 0 disruptions, polls up to 60s for stabilization.<br/>**Drain Execution:** Resolves K8s node name (short hostname or FQDN), enables `rke2-server`/`rke2-agent`, then runs `kubectl cordon` and bounded `kubectl drain --ignore-daemonsets --delete-emptydir-data --force --grace-period=60 --timeout=900s` with eviction output streamed to the run log. Auto-uncordons on failure. | Polls `kubectl get node` for `Ready == True` (300s for VMs, 600s for physical nodes). For masters, polls `/healthz/etcd` (180s). Runs `kubectl uncordon`. For masters, polls `kube-system` and `cattle-system` pods on the node (180s) until all non-job pods report `Ready`. **Post-Flight Workload Stabilization:** Polling loop runs for 60s (`12 * 5s`) before comparing pre-patch vs post-patch namespace pod counts to eliminate transient false-positive pod drop warnings. |
 | **Generic** | `aif_dev`, `aif_air`, `aif_dbutl`, `aif_mon` | Sorted by `(site, hostname)`. | Pre-flight discovers running Docker containers, non-excluded systemd services, and `RUNNING` `supervisord` tasks. Stops `supervisorctl`, discovered systemd units, and `docker`. | Polls up to 60s (`30 * 2s`) for all discovered Docker containers, systemd services, and supervisord tasks to return to running state; issues forced `start`/`restart` commands if any fail to auto-recover. |
 
 ### 5.3. Autonomous Weekend Patching Scheduler & Drift Evaluation (`SchedulerManager`)
@@ -313,13 +313,21 @@ sequenceDiagram
   * Groups/sites where nodes have `auto_patch=True` receive `status="SCHEDULED"` and are executed automatically when their weekend window arrives.
   * Groups/sites where nodes have `auto_patch=False` receive `status="VISIBILITY_ONLY"`, providing full fleet visibility in `schedule list` and the Friday digest email while skipping automatic execution. Once their scheduled weekend window passes, `SchedulerManager` automatically rolls their `scheduled_for` timestamp forward by `+7 days` to the next weekend.
 * **Strict Single-Flight Execution (`_patching_lock`):** A global threading lock ensures **never more than 1 patching run executes concurrently**. If `aif_psql` takes 40 minutes, the next scheduled group (`01:30 UTC`) waits for the lock to release and starts immediately afterward.
+* **Execution Order & Slot Protection:** When `SchedulerManager._scheduler_daemon` runs, it processes due weekend schedules (`_process_due_schedules()`) *before* executing daily inspections and schedule re-evaluations. Future schedule slots (`scheduled_for > now`) are strictly preserved (`preserve_existing_slot=True`), ensuring active windows are not overwritten or pushed +7 days prior to execution.
+* **Failure Handling & Next-Weekend Rescheduling:** If an automated weekend patching run fails on a node (`status: failed - <hostname>`), `SchedulerManager._execute_scheduled_patching()` dispatches an immediate failure alert email with the failed node and execution log tail, and automatically reschedules the group to the next available slot in next weekend's queue (`_compute_next_available_weekend_slot()`). `evaluate_and_populate_schedule()` and `SQLWriter.upsert_patching_schedule()` preserve only future slots (`scheduled_for > now`) and advance past/expired slots, preventing failed runs from being perpetually re-armed into immediate retry loops within the same window.
+* **Warning Status & Schedule Queue Clearing:** If all nodes in a group patch and reboot cleanly (0 pending packages), but post-flight cluster health verification detects degraded workloads, unready nodes, or VIP imbalances, the run concludes with status `"warning"`. Because all nodes are fully patched to the latest kernel, `SchedulerManager` clears the schedule entry from `patching_schedules` to prevent redundant re-execution, while dispatching a dedicated alert email containing the post-flight cluster verification log.
 * **Built-In Email Reporting (`EmailClient`):**
   * **Friday Pre-Flight Digest (`friday_digest_hour_utc: 14`):** Sends an HTML + plaintext summary of all weekend schedules, clearly separating active `auto_patch=True` groups from visibility-only `auto_patch=False` groups and listing affected VMs.
-  * **Immediate Failure Alert:** Dispatches an alert email immediately if an automated weekend patching run fails, including the failed node, `run_id`, and the last 30 lines of execution logs.
+  * **Immediate Failure Alert:** Dispatches an alert email immediately if an automated weekend patching run fails or ends in warning, clearly distinguishing between node-level patch failures and post-flight cluster health warnings, and attaching the dedicated `verification_log` without duplicating stream tails.
   * **Sunday Weekend Summary (`sunday_summary_hour_utc: 20`):** Sends a summary of all completed weekend runs (with kernel transitions) and rolled-over visibility schedules.
 
 ### 5.4. State Changes & Terminal Outputs
-* **`PatchingRun.status` Enum Values:** `"running"`, `"completed"`, `"failed - <hostname>"`, `"failed - init"`, `"failed - no nodes"`, `"failed - exception"`.
+* **`PatchingRun.status` Enum Values:**
+  - `"running"`: Patching run is currently active.
+  - `"completed"`: All nodes patched and rebooted cleanly, and post-flight cluster verification passed with 100% healthy quorum and workloads.
+  - `"warning"`: All nodes patched and rebooted cleanly to latest kernel (0 pending packages), but post-flight cluster health verification detected degraded workloads, unready pods, or VIP imbalances.
+  - `"failed - <hostname>"`: OS patching, pre-flight check, failover, or post-reboot recovery failed on the specified node. Execution halted immediately to protect cluster quorum.
+  - `"failed - init"` / `"failed - no nodes"` / `"failed - exception"`: Initialization, node resolution, or unhandled runtime failure.
 * **HITL & Learning Loops:** Not applicable for this module. When invoked via gRPC (`ExecuteRollingPatch`), OMU executes autonomously (`auto_confirm=True`) and halts deterministically upon any pre-flight, failover, or post-flight verification failure.
 
 ---
@@ -360,15 +368,16 @@ OMU persists state in PostgreSQL (`sam_admin_prod_db`) using SQLAlchemy declarat
 | | `trigger_source` | `String(100)` | `NOT NULL` | Originator identifier (`"grpc-cli"` or `"scheduler-auto"`). |
 | | `started_at` | `DateTime` | `NOT NULL` | UTC start timestamp. |
 | | `completed_at` | `DateTime` | `NULLABLE` | UTC completion timestamp. |
-| | `status` | `String(50)` | `NOT NULL` | Terminal status string. |
+| | `status` | `String(50)` | `NOT NULL` | Terminal status string (`"completed"`, `"warning"`, `"failed - <node>"`). |
+| | `verification_log` | `Text` | `NULLABLE` | Captured output of post-flight cluster health verification (`verify_cluster_health()`), isolated from node-specific logs. |
 | **`node_patch_logs`** | `log_id` | `String(36)` | `PRIMARY KEY` | UUIDv4 identifier for the node log entry. |
 | | `run_id` | `String(36)` | `FK(patching_runs.run_id)` | Cascaded foreign key to parent `PatchingRun`. |
 | | `hostname` | `String(255)` | `FK(managed_nodes.hostname)` | Cascaded foreign key to `ManagedNode`. |
-| | `pre_kernel` | `String(100)` | `NULLABLE` | Kernel string (`uname -r`) prior to patching. |
+| | `pre_kernel` | `String(100)` | `NULLABLE` | Kernel string (`uname -r`) prior to patching (`"In Progress"` while running). |
 | | `post_kernel` | `String(100)` | `NULLABLE` | Kernel string (`uname -r`) after patching/reboot. |
 | | `packages_upgraded` | `Integer` | `NULLABLE` | Total APT packages upgraded during the run. |
 | | `skipped_reboot` | `Boolean` | `default=False` | `True` if reboot was bypassed. |
-| | `raw_execution_log` | `Text` | `NULLABLE` | Complete captured stdout/stderr stream for the node. |
+| | `raw_execution_log` | `Text` | `NULLABLE` | Complete captured stdout/stderr stream for the node, created at node start and flushed/upserted every 3 seconds for live streaming. |
 | **`patching_schedules`** | `schedule_id` | `String(36)` | `PRIMARY KEY` | UUIDv4 identifier for the schedule queue entry. |
 | | `group` | `String(100)` | `NOT NULL` | Target patching group (e.g., `aif_dcs`, `aif_psql`). |
 | | `location` | `String(50)` | `default="ALL"` | Site scope (`"ALL"`, `"SLO"`, `"NYC"`, `"PRG"`, `"DAL"`). |
@@ -400,13 +409,13 @@ OMU exposes two gRPC services on port `50104` with gRPC Server Reflection and st
 | :--- | :--- | :--- | :--- |
 | `ExecuteRollingPatch` | `PatchRequest` (`component`, `group`, `location`, `inspect_only`, `force_reboot`) | `stream PatchResponse` (`run_id`, `success`, `message`) | Spawns background orchestrator thread under single-flight `_patching_lock`, streams execution logs, syncs NetBox post-run, and immediately evaluates/populates `patching_schedules`. |
 | `IntrospectFleet` | `IntrospectRequest` (`component`, `location`) | `IntrospectResponse` (`success`, `report_json`) | Synchronously audits the requested fleet component using `ThreadPoolExecutor` and returns a serialized JSON report containing `health_mode`, `nodes`, and `vips`. |
-| `SyncInventory` | `SyncRequest` (`query`) | `SyncResponse` (`success`, `message`, `nodes_synced`) | Pulls VMs and physical devices matching `query` (default `"-aif-"`) from NetBox and discovers Kubernetes workloads (`keycloak`, `vault`) via Rancher API, upserting `managed_nodes`. |
+| `SyncInventory` | `SyncRequest` (`query`) | `SyncResponse` (`success`, `message`, `nodes_synced`) | Pulls VMs and physical devices matching `query` (default `"-aif-, -hal-"`) from NetBox and discovers Kubernetes workloads (`keycloak`, `vault`) via Rancher API, upserting `managed_nodes`. |
 | `GetInventorySummary` | `SummaryRequest` (`include_details`, `group`, `strategy`, `device_type`) | `SummaryResponse` (`total_nodes`, `patched_today`, `pending_patch`, `pending_nodes`) | Aggregates fleet patching completion metrics (excluding `is_excluded=True` and `device_type='kube'`) and returns detailed node metadata including `auto_patch`. |
 | `ModifyNode` | `ModifyNodeRequest` (`hostname`, `group`, `location`, `strategy`, `is_excluded`, `health_mode`, `auto_patch`) | `ModifyNodeResponse` (`success`, `message`, `nodes_updated`) | Updates patching strategy, exclusion flag, `auto_patch` status, or `health_mode` (`API`/`SSH`/`UNKNOWN`) for a single node, site, or entire group, re-evaluating `patching_schedules` when `auto_patch` or `is_excluded` changes. |
 | `GetSchedules` | `GetSchedulesRequest` (`group`, `location`) | `GetSchedulesResponse` (`success`, `schedules`) | Queries `patching_schedules` ordered by `scheduled_for ASC` and returns all active and visibility-only weekend slots. |
 | `ManageSchedule` | `ManageScheduleRequest` (`action`, `group`, `location`, `scheduled_for`, `auto_patch`, `email_type`) | `ManageScheduleResponse` (`success`, `message`, `affected_count`) | Executes schedule management actions: `"evaluate"` (recomputes drift & slots), `"set"` (adapts window time and/or toggles `auto_patch`), `"delete"` (removes entry), or `"send_email"` (dispatches `"friday"`, `"sunday"`, or `"failure"` email). |
 | `GetAuditRuns` | `AuditRunsRequest` (`limit`) | `AuditRunsResponse` (`runs`) | Returns the most recent `limit` (default 50) `PatchingRun` records ordered by `started_at DESC`. |
-| `GetAuditLogs` | `AuditLogsRequest` (`run_id`) | `AuditLogsResponse` (`logs`) | Returns all `NodePatchLog` entries (including `raw_execution_log`) for a specific `run_id`. |
+| `GetAuditLogs` | `AuditLogsRequest` (`run_id`) | `AuditLogsResponse` (`logs`, `verification_log`, `status`) | Returns all `NodePatchLog` entries (including `raw_execution_log`), post-flight cluster `verification_log`, and terminal run `status` for a specific `run_id`. |
 | `GetHAProxyConfig` | `GetHAProxyConfigRequest` (`group`, `location`) | `GetHAProxyConfigResponse` (`success`, `configs`) | Read-only dependency inspection: concurrently fetches `/etc/haproxy/haproxy.cfg` across all HAProxy nodes in `group` via SSH strictly to verify Keepalived VRRP topology and VIP peer takeovers prior to node reboots. |
 
 ### 8.2. `sera.standard.v1.SeraAppService` Contract (`grpc_api/sera_standard_service.py`)
@@ -424,7 +433,7 @@ OMU implements the universal SERA standard contract (`sera.standard.v1.SeraAppSe
 
 | Worker / Thread Name | Trigger & Schedule | Concurrency & Locking | Operational Logic & Retry Policy |
 | :--- | :--- | :--- | :--- |
-| **`SchedulerManager._scheduler_daemon`** | Daemon thread started on gRPC server boot. Sleeps `300s` initially, then loops every `600s` (10 minutes). | Single background daemon thread per server instance; enforces `self._patching_lock` for single-flight patching. | 1. **Daily Inspections:** Sweeps groups where any node has `last_inspected == None` or `> 24h` (`inspect_only=True`).<br/>2. **Dynamic Schedule Population:** Evaluates kernel updates & >30-day patch age post-inspect and assigns 30-min staggered Saturday slots (`01:00`, `01:30`, ...) in `patching_schedules`.<br/>3. **Weekend Execution & Rollover:** Runs due `auto_patch=True` schedules sequentially (1 at a time) and rolls past-due `auto_patch=False` visibility entries forward by `+7d`.<br/>4. **Email Reporting:** Dispatches Friday digest, immediate failure alerts, and Sunday summary emails via `EmailClient`. |
+| **`SchedulerManager._scheduler_daemon`** | Daemon thread started on gRPC server boot. Sleeps `300s` initially, then loops every `600s` (10 minutes). | Single background daemon thread per server instance; enforces `self._patching_lock` for single-flight patching. | 1. **Daily Inspections:** Sweeps groups where any node has `last_inspected == None` or `> 24h` (`inspect_only=True`).<br/>2. **Dynamic Schedule Population:** Evaluates kernel updates & >30-day patch age post-inspect and assigns 30-min staggered Saturday slots (`01:00`, `01:30`, ...) in `patching_schedules`.<br/>3. **Weekend Execution & Rollover:** Runs due `auto_patch=True` schedules sequentially (1 at a time), reschedules failed runs to next weekend's queue, and rolls past-due `auto_patch=False` visibility entries forward by `+7d`.<br/>4. **Email Reporting:** Dispatches Friday digest, immediate failure alerts, and Sunday summary emails via `EmailClient`. |
 | **`ExecuteRollingPatch.run_patching`** | Spawned on-demand per `ExecuteRollingPatch` gRPC call. | Acquires `SchedulerManager._patching_lock` when `inspect_only=False` so manual and scheduled patches never run concurrently. | Runs `orchestrator.run(auto_confirm=True)`. Regardless of whether the client disconnects (`not context.is_active()`), the background thread continues to completion, updates `PatchingRun.status`, syncs NetBox, and refreshes `patching_schedules`. |
 | **`BaseIntrospector._run_concurrent_checks`** | Invoked during `IntrospectFleet` and `GetHAProxyConfig`. | `ThreadPoolExecutor` (`max_workers=5` to `15` depending on component). | Executes non-blocking parallel SSH, HTTP, or SQL health checks across all nodes in a component group. |
 
@@ -440,12 +449,12 @@ The OMU CLI (`operation_management_utility.py`) is built on `click` using a cust
 | :--- | :--- | :--- |
 | **Root (`cli`)** | `start-grpc-server`<br/>`init-db [--force]` | Starts the OMU gRPC server on port `50104`.<br/>Initializes (or recreates with `--force`) PostgreSQL tables. |
 | **`module`** | `module info [--grpc]`<br/>`module check-health [--grpc]` | Calls OMU's own `SeraAppService.GetAppInfo` and `GetDeepHealth`. |
-| **`inventory`** | `inventory sync [--query <str>]`<br/>`inventory summary [--group <grp>] [--strategy <strat>] [--type <t>] [--grpc]`<br/>`inventory modify [--hostname <h> \| --group <g>] [--location <loc>] [--strategy <s>] [--exclude true\|false] [--auto-patch true\|false] [--health-mode API\|SSH\|UNKNOWN]`<br/>`inventory updates <hostname>` | Synchronizes NetBox VMs/Devices and Rancher K8s workloads into `managed_nodes`.<br/>Aggregates patching completion metrics (including `AUTO` column).<br/>Updates node/group strategies, exclusion, `auto_patch`, and polling modes.<br/>Displays pending updates for a specific node. |
+| **`inventory`** | `inventory sync [--query <str>]`<br/>`inventory summary [--group <grp>] [--strategy <strat>] [--type <t>] [--grpc]`<br/>`inventory modify [--hostname <h> \| --group <g>] [--location <loc>] [--strategy <s>] [--exclude true\|false] [--auto-patch true\|false] [--health-mode API\|SSH\|UNKNOWN]`<br/>`inventory updates <hostname>` | Synchronizes NetBox VMs/Devices (default query `"-aif-, -hal-"`) and Rancher K8s workloads into `managed_nodes`.<br/>Aggregates patching completion metrics (including `AUTO` column).<br/>Updates node/group strategies, exclusion, `auto_patch`, and polling modes.<br/>Displays pending updates for a specific node. |
 | **`schedule`** | `schedule list [--group <g>] [--location <loc>] [--grpc]`<br/>`schedule evaluate [--group <g>] [--location <loc>]`<br/>`schedule set --group <g> [--location <loc>] [--time "YYYY-MM-DD HH:MM"] [--auto-patch true\|false]`<br/>`schedule remove --group <g> [--location <loc>]`<br/>`schedule email --type <friday\|sunday\|failure> [--group <g>] [--location <loc>]` | Displays the dynamic weekend patching schedule queue.<br/>Evaluates kernel/30-day drift and populates 30-min weekend slots.<br/>Adapts a group's scheduled window time or toggles `auto_patch`.<br/>Removes an entry from `patching_schedules`.<br/>Dispatches on-demand Friday digest, Sunday summary, or failure alert emails. |
 | **`status`** | `status all` | Executes sequential global fleet audits across all 11 component domains. |
 | **Component Audits** | `<component> status [--location <loc>] [--grpc]`<br/>`haproxy config-explorer [--group <grp>] [--location <loc>] [--detailed]` | Audits live topology and health for `patroni`, `valkey`, `kafka`, `qdrant`, `dcs`, `vault`, `haproxy`, `rancher`, `k8s`, `keycloak`, or `generic`. |
 | **Component Patching** | `<component> <inspect\|patch> [--group <grp>] [--location <loc>] [--force-reboot]` | Executes pre-flight inspection (`inspect`) or rolling zero-downtime OS upgrade (`patch`) across target cluster topology. |
-| **`audit`** | `audit runs [--limit 50] [--grpc]`<br/>`audit logs <run_id> [--raw] [--grpc]`<br/>`audit clear-stuck` | Lists historical patching runs.<br/>Retrieves node execution logs (raw stdout/stderr or parsed).<br/>Purges orphaned runs stuck in running/failed states. |
+| **`audit`** | `audit runs [--limit 50] [--grpc]`<br/>`audit logs <run_id> [--raw] [--grpc]`<br/>`audit clear-stuck` | Lists historical patching runs with color-coded status (`green` completed, `yellow` warning, `red` failed).<br/>Retrieves node execution logs (raw stdout/stderr or parsed) and displays the dedicated `🌍 CLUSTER POST-FLIGHT VERIFICATION LOG` section if post-flight checks ran.<br/>Purges orphaned runs stuck in running/failed states. |
 | **`ssh`** | `ssh verify [--inventory-file <path>] [--group all] [--limit 0]`<br/>`ssh execute --cmd "<command>" [--group all] [--limit 0] [--sudo]` | Verifies SSH key reachability and in-memory auth across fleet.<br/>Executes concurrent ad-hoc commands with sudo password scrubbing. |
 
 ### 11.2. CLI Quick Execution Examples
@@ -454,14 +463,13 @@ The OMU CLI (`operation_management_utility.py`) is built on `click` using a cust
 # Server & Database Lifecycle
 python3 operation_management_utility.py start-grpc-server
 python3 operation_management_utility.py init-db [--force]
-python3 scripts/alter_table.py
 
 # SERA Standard Module Introspection
 python3 operation_management_utility.py module info [--grpc]
 python3 operation_management_utility.py module check-health [--grpc]
 
 # Inventory & Metadata Management
-python3 operation_management_utility.py inventory sync [--query "-aif-"]
+python3 operation_management_utility.py inventory sync [--query "-aif-, -hal-"]
 python3 operation_management_utility.py inventory summary [--group <grp>] [--strategy <strat>] [--type <physical|vm|kube>] [--grpc]
 python3 operation_management_utility.py inventory modify [--hostname <host> | --group <grp>] [--location <loc>] [--strategy <strat>] [--exclude true|false] [--auto-patch true|false] [--health-mode API|SSH|UNKNOWN]
 python3 operation_management_utility.py inventory updates <hostname>
@@ -545,6 +553,9 @@ python3 operation_management_utility.py ssh execute --cmd "<command>" [--group a
 3. **Kafka Pre-Reboot Rollback:** If stopping the Kafka service on a KRaft controller leader fails to trigger a new leader election on a sibling node within 60 seconds, `KafkaPatchingOrchestrator.pre_reboot_hook` actively rolls back by executing `systemctl start kafka` on the leader and aborting the reboot.
 4. **Kubernetes Drain Rollback:** If `kubectl drain` fails or times out on a Kubernetes node, `K8sPatchingOrchestrator` immediately issues `kubectl uncordon` to restore scheduling on the node before aborting.
 5. **Orphaned Run Cleanup:** If the OMU process is forcibly terminated mid-patch, operators can run `audit clear-stuck` to purge runs stuck in `'running'` or `'failed - init'` states along with their child `node_patch_logs` records.
+6. **HAProxy Failover Error Recovery:** If `keepalived` or `haproxy` fails to stop cleanly or peer VIP takeovers fail during `pre_reboot_hook()`, `HAProxyPatchingOrchestrator` immediately invokes `restore_services()` (`systemctl reset-failed` and `systemctl start keepalived haproxy`) before halting, ensuring the node is restored to full active service instead of remaining in a degraded state.
+7. **Kubernetes PVC Auto-Expansion & Pre-Drain PDB Deadlock Remediation:** If pods on a Kubernetes node or peer pods in a PodDisruptionBudget are crash-looping due to PVC storage exhaustion, `K8sPatchingOrchestrator` dynamically expands the PVC (`+20%` / `+10%`), ensures `allowVolumeExpansion: true`, and restarts affected pods prior to cordoning and draining, preventing indefinite PDB-eviction deadlocks.
+8. **Kubernetes Drain Timeout & Auto-Uncordon:** `kubectl drain` is executed with a strict `--timeout=900s` limit and streams eviction progress in real time. If evictions fail to complete within 15 minutes, the orchestrator aborts and automatically uncordons the node to restore cluster scheduling.
 
 ---
 
