@@ -355,33 +355,19 @@ python3 data_inspector_utility.py debug store <page_id> --output page_dump.json
 
 ### 12.1. Configuration Reference (`config/settings.yaml`)
 
+*(Note: Universal SERA boilerplate blocks—`module_info.*`, standard `logging.*`, and standard protobuf `paths.*`—are omitted below; see `conf_concept.md`.)*
+
 | YAML Key Path | Purpose | Default / Configured Value |
 | :--- | :--- | :--- |
-| `module_info.name` | Human-readable module name | `"Data Inspector Utility"` |
-| `module_info.version` | Current semantic version | `"0.2.7"` |
-| `module_info.acronym` | Ecosystem module identifier | `"DIU"` |
-| `module_info.category` | Ecosystem module category | `"Utility"` |
-| `system_services.grpc.service_name` | Systemd unit name checked by SERA health probes | `"diu-grpc.service"` |
-| `system_services.grpc.host` | gRPC server bind address | `"0.0.0.0"` |
-| `system_services.grpc.port` | gRPC server listen port | `50109` |
-| `system_services.grpc.max_workers` | ThreadPoolExecutor worker count | `10` |
+| `system_services.grpc` | Systemd unit, bind address/port, and `ThreadPoolExecutor` worker count | `"diu-grpc.service"` (`0.0.0.0:50109`, `10` workers) |
 | `database.write_dsn` | PostgreSQL write connection string | `"postgresql://ai_assistant_user:***@localhost:5432/knowledge_base_db"` |
 | `database.read_dsn` | PostgreSQL read connection string | `"postgresql://ai_assistant_user:***@localhost:5432/knowledge_base_db"` |
-| `vector_database.host` | ChromaDB server hostname (overridable via `VDB_HOST` env) | `"localhost"` |
-| `vector_database.port` | ChromaDB server port (overridable via `VDB_PORT` env) | `8000` |
+| `vector_database.host` / `port` | ChromaDB server hostname and port (overridable via `VDB_HOST` / `VDB_PORT` env) | `"localhost"` / `8000` |
 | `vector_database.collection_name` | Primary chunk embeddings collection | `"confluence_store"` |
 | `vector_database.page_summary_collection_name` | Page summaries vector collection | `"confluence_page_summaries"` |
 | `vector_database.qa_vdb_collection_name` | Generated questions (HyDE) vector collection | `"confluence_question_embeddings"` |
 | `vector_database.synthesized_qna_collection_name` | Multi-page synthesized Q&A vector collection | `"confluence_synthesized_qna"` |
-| `paths.proto_source_dir` | Relative path to DIU proto definitions | `"grpc_api/protos"` |
-| `paths.sera_proto_source_dir` | Global path to `sera_standard.proto` | `"/ai/assets/protos/sera_standard"` |
-| `paths.generated_stubs_path` | Shared output directory for compiled Python gRPC stubs | `"/ai/assets/protos/data_inspector_utility/generated"` |
-| `schema_generator.source_model_paths` | Reference model path for schema generation | `["confluence_ingestor/database/models.py"]` |
-| `logging.level` | Default server console log level | `"INFO"` |
-| `logging.log_dir` | Centralized log output directory | `"/ai/assets/logs/diu_utility"` |
-| `logging.app_log_filename` | Base filename for daily application logs | `"diu.log"` |
-| `logging.error_log_filename` | Base filename for daily warning/error logs | `"diu_err.log"` |
-| `logging.enable_file_logging` | Enables `MultiProcessSafeDailyLogger` file output | `true` |
+| `schema_generator.source_model_paths` | Reference model path for dynamic Pydantic DTO schema generation | `["confluence_ingestor/database/models.py"]` |
 
 ### 12.2. Security & Identity Propagation
 - **DSN Sanitization:** `SeraStandardServiceImpl.GetDeepHealth` strips passwords from all PostgreSQL and cache connection strings via `sanitize_dsn()` before serializing `connection_metadata` over gRPC.

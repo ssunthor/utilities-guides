@@ -462,27 +462,21 @@ python3 health_monitor_utility.py cleanup-ghosts [--dry-run]
 
 ### 12.1. `config/settings.yaml` Reference
 
+*(Note: Universal SERA boilerplate blocks—`module_info.*`, standard `logging.*`, and standard protobuf `paths.*`—are omitted below; see `conf_concept.md`.)*
+
 | Configuration Key | Purpose | Default / Configured Value |
 | :--- | :--- | :--- |
-| `module_info.acronym` | Ecosystem module identifier injected into `x-client-id` gRPC metadata | `"HMU"` |
-| `module_info.version` | Semantic version fallback | `"0.4.2"` |
-| `system_services.grpc.service_name` | Systemd unit name checked by `GetAppInfo` and `GetDeepHealth` | `"hmu-grpc.service"` |
-| `system_services.grpc.host` / `port` | gRPC server bind address and port | `"0.0.0.0"` / `50101` |
-| `system_services.grpc.max_workers` | ThreadPoolExecutor worker count for the gRPC server | `20` |
+| `system_services.grpc` | Systemd unit, bind address/port, and `ThreadPoolExecutor` worker count | `"hmu-grpc.service"` (`0.0.0.0:50101`, `20` workers) |
 | `database.write_dsn` | PostgreSQL primary read/write connection string | `postgresql://sam_admin_prod_user:***@slo-aif-hadb.slo.gt-t.net:5432/sam_admin_prod_db` |
 | `database.read_dsn` | PostgreSQL HAProxy read-only replica connection string | `postgresql://sam_admin_prod_user:***@slo-aif-ha.slo.gt-t.net:5433/sam_admin_prod_db` |
-| `external_services.vault.url` | HashiCorp Vault endpoint | `"https://vault-aif.gt-t.net:8200"` |
-| `external_services.vault.role_id` / `secret_id` | AppRole credentials used by `VaultClient` | Configured per environment |
+| `external_services.vault` | HashiCorp Vault endpoint and AppRole credentials (`role_id`, `secret_id`) | `"https://vault-aif.gt-t.net:8200"` |
 | `rancher_clusters.{prg\|slo\|nyc}` | Multi-cluster Rancher proxy URLs and `cluster_id`s (`c-m-74sc9qpk`, `c-m-lh85lg66`, `c-m-vkz7jqjh`) | Configured per datacenter |
 | `vault_paths.rancher_admin` | Vault KV v2 path template for Rancher bearer tokens | `"rancher/{loc}/system/gia_ai"` |
 | `vault_paths.llm_api_key` | Vault KV v2 path for static global AI Factory API key (`sk_aif_...`) | `"haproxy/global/apps/gia-test"` |
 | `vm_haproxy.{prg\|slo\|nyc}` | External VM HAProxy CSV endpoints (`http://10.250.{146\|133\|99}.50:9000/;csv`) and basic auth | Configured per datacenter |
 | `cache_clusters.redis_dev.url` | Local Redis connection URL for `redis-inspect` | `"redis://:***@localhost:6379"` |
 | `cache_clusters.valkey_prod.nodes` | 9 global Valkey cluster FQDNs (`{slo\|nyc\|prg}-aif-rds0{1..3}.*.gt-t.net`) | 9 nodes |
-| `logging.directory` | Base directory for daily rolling application and error logs | `"/ai/assets/logs/hmu_utility"` |
 | `transaction_logging.enabled` / `retain_count` | Enables JSON RPC transaction dumps and sets max retained files | `true` / `50` |
-| `paths.generated_stubs_path` | Shared output directory for compiled `_pb2.py` and `_pb2_grpc.py` files | `"/ai/assets/protos/health_monitor_utility/generated"` |
-| `paths.sera_proto_source_dir` | Directory containing `sera_standard.proto` | `"/ai/assets/protos/sera_standard"` |
 | `llm_engines.primary` | Primary reasoning LLM (`google/gemma-4-31B-it`, `enable_thinking: "enable"`, `timeout: 300s`) | `"https://aif-llm-gemma4-31b.aif.gt-t.net"` |
 | `llm_engines.secondary` | Secondary fast LLM for Auto-Classifier (`google/gemma-4-E4B-it`, `enable_thinking: "disable"`, `timeout: 180s`) | `"https://aif-llm-gemma4-e4b.aif.gt-t.net"` |
 

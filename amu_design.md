@@ -4,8 +4,8 @@
 **Category:** (U) Utility
 **Name:** Application Management Utility
 **Acronym:** AMU
-**Version:** 0.4.0
-**Date:** 2026-10-12
+**Version:** 0.4.3
+**Date:** 2026-10-31
 **Author:** Martin Kecka & Gemini AI
 **Status:** Active
 
@@ -128,17 +128,17 @@ graph TD
 │   ├── utils.py                          # gRPC channel builders, MetadataClientInterceptor, JSON printer, and @handle_grpc_errors
 │   └── commands/
 │       ├── __init__.py                   # CLI commands package marker
-│       ├── audit_cmds.py                 # `audit llms` (flags non-prod endpoints and legacy models) and `audit infra` (audits dev vs prod infra)
+│       ├── audit_cmds.py                 # `audit llms` (flags non-prod endpoints and legacy models), `audit infra` (audits dev vs prod infra), and `audit docs` (audits design docs currency & 14-header compliance)
 │       ├── deploy_cmds.py                # `deploy push-std` (rolls out sera_standard_service.py to apps, restarts services, re-registers)
 │       ├── git_cmds.py                   # `git status`, `git commit`, `git history`, `git rollback`, `git sync` (LLM SmartSync), and `git sync-docs`
 │       ├── health_cmds.py                # `health get-all` and `health get <acronym>` for aggregated deep health inspection
-│       ├── info_cmds.py                  # `info ports`, `info list-apps`, `info get-changelog`, `info get-docs`, `info deployments`, `info export-settings`, `info codebase`
+│       ├── info_cmds.py                  # `info ports`, `info list-apps`, `info get-changelog`, `info get-docs`, `info deployments`, `info export-settings`, `info codebase` (with `--search` & `--category` filters)
 │       ├── module_cmds.py                # `module info` and `module check-health` querying AMU's own SeraAppService
 │       ├── registry_cmds.py              # `registry register`, `registry list`, `registry deps`, and `registry delete`
 │       └── releases_cmds.py              # `releases summary` aggregating versions and changelog categories across active apps
 ├── core/
 │   ├── __init__.py                       # Core package marker
-│   ├── git_manager.py                    # GitOpsManager: Git execution, diff extraction, CHANGELOG prepending, commits, and rollbacks with permission healing
+│   ├── git_manager.py                    # GitOpsManager: Git execution, diff extraction, majority author detection, AD/NSS full-name resolution, CHANGELOG prepending, commits, and rollbacks with permission healing
 │   ├── llm_interface.py                  # vLLMClient: HTTP inference client with Vault API key injection and thinking mode support
 │   ├── port_manager.py                   # PortManager: Inspects OS sockets (ss), Docker containers, and /proc to map ports and calculate free blocks
 │   ├── registry_manager.py               # RegistryManager: Endpoint discovery, path inference, boundary/env classification, and DB persistence
@@ -261,9 +261,11 @@ AMU maintains the master reference implementation of `SeraStandardServiceImpl`, 
 * **gRPC Block Planner:** Partitions ports `50051` to `50150` into `10` contiguous blocks of `10` ports each (`50051-50060`, `50061-50070`, ..., `50141-50150`). Flags a block as `is_totally_free = True` only if all 10 ports in the block have zero active listeners.
 * **Process Attribution:** Cross-references `ss -ltnp` PIDs against `/proc/<pid>/cgroup` (`Docker` if `docker`/`moby`, `Systemd` if `system.slice`, `User` if `user.slice`) and `/proc/<pid>/cmdline` (extracting `/ai/<folder1>/<folder2>` names) alongside `docker ps` port mappings.
 
-### 5.4. Audit Compliance Rules (`audit_cmds.py`)
+### 5.4. Audit Compliance & Search Rules (`audit_cmds.py` & `info_cmds.py`)
 * **LLM Audit (`audit llms`):** Flags any registered `LlmModel` where `"aif.gt-t.net"` is not in `base_url` as `⚠️ NON-PRODUCTION ENDPOINT`, and flags any model containing `"gemma-3"` or `"gemma3"` as `⚠️ SHOULD BE REPLACED WITH gemma4-31b`.
 * **Infrastructure Audit (`audit infra`):** Categorizes applications based on `infra` group dependencies into `✅ PRODUCTION READY` (only `prod` deps) vs `❌ MIXED INFRA` / `❌ HAS DEV INFRA`, grouping offending applications by their target `dev` database name to streamline migration planning.
+* **Documentation Audit (`audit docs`):** Queries `GetAppDocs` across registered applications, extracts the markdown `**Version:**` header via regex, and compares it against the registered `Application.version` (`✅ MATCH` vs `❌ OUTDATED` / `❌ NO DOC`). Concurrently counts `## ` level-2 headers to validate compliance with the 14-header Ecosystem Documentation Standard (`docs_concept.md`, flagging `✅ STANDARD` when `header_count == 14`, else `❌ OUT OF STD`).
+* **Cross-Entity Search & Connector Resolution (`app_matches_search`):** Powers `--search` (`-s`) filtering in `info list-apps` and `info deployments`, matching queries across acronym, name, category, description, physical path, dependencies, services, LLM models, and metadata. For dependencies where `dependency_type == 'grpc_connector'` or `dependency_group == 'connector'`, it automatically resolves the prefix (e.g., `nbc_connector` $\rightarrow$ `nbc`) against the registered application lookup table so searching for a target connector's name or acronym surfaces all consuming applications.
 
 ---
 
@@ -290,11 +292,12 @@ AMU integrates with the AI Factory's **vLLM** inference cluster via `core/llm_in
      2. **Map Phase (`_extract_features`):** Invokes `EXTRACT_FEATURES_PROMPT` (`json_mode=False`, `temperature=0.2`) on each chunk to extract architectural bullet points.
      3. **Reduce Phase (`_merge_features`):** Combines all extracted bullet points and invokes `MERGE_CHANGELOG_PROMPT` (`json_mode=True`) to deduplicate and categorize items into single-quoted YAML.
      4. **Final Classification:** Feeds the `"MERGED FEATURES FROM LARGE DIFF"` into `SMART_SYNC_PROMPT`.
-3. **YAML Sanitization & Version Bumping:**
+3. **YAML Sanitization, Author Attribution & Version Bumping:**
+   * **Dynamic Majority Author Attribution (`GitOpsManager.detect_majority_author`):** Determines commit and changelog authorship using a 4-tier priority hierarchy: (1) explicit `--author` / `author_override`, (2) majority author of uncommitted files (excluding `CHANGELOG.yaml`, `/cache/`, and `__pycache__`, and ignoring system/bot accounts with `uid < 1000` or in `["root", "nobody", "gia-ai"]`) ranked by `(file_count, total_modified_lines, latest_mtime)` and resolved to corporate full names via `pwd.getpwnam()` GECOS stripping trailing role tags (`ADM`, `PRV`, `CON`, `EXT`, `SYS`), (3) current session user (`getpass.getuser()`), or (4) previous `CHANGELOG.yaml` entry author (`"GIA AI"` fallback).
    * If `is_major == True`, validates `new_changelog_yaml` with `yaml.safe_load`. If malformed, applies regex auto-correction (`^[ \t]*- category:` $\rightarrow$ `- category:` and `^[ \t]*items:` $\rightarrow$ `  items:`) and re-parses.
    * Normalizes the YAML list and invokes `COMMIT_MESSAGE_PROMPT` (`_generate_commit_message`) to generate a ~60-character noun-phrase commit summary.
    * **Custom Version Bump Formula:** Splits `X.Y.Z` into `minor = int(parts[1])` and `patch = int(parts[2])`. If `patch >= 9`, increments `minor += 1` and resets `patch = 0` (e.g., `0.3.9` $\rightarrow$ `0.4.0`); otherwise increments `patch += 1`.
-   * Prepends the new release block to `docs/CHANGELOG.yaml` using the max `mtime` of uncommitted files as the release date, syncs `config/settings.yaml` via regex `^( {2}version:\s*")([^"]+)(")`, and pushes to GitLab.
+   * Prepends the new release block to `docs/CHANGELOG.yaml` using the max `mtime` of uncommitted files as the release date, syncs `config/settings.yaml` via regex `^( {2}version:\s*")([^"]+)(")`, and pushes to GitLab using the `gia-ai` service credentials.
 
 ---
 
@@ -393,10 +396,10 @@ AMU provides a rich administrative CLI via `python3 application_management_utili
 | **`registry`** | `registry deps [--grpc]` | Prints the full dependency DAG from PostgreSQL including environment, network boundary, and sanitized connection metadata. |
 | **`registry`** | `registry delete <acronym>` | Deletes an application and its cascading services/dependencies from PostgreSQL. |
 | **`info`** | `info ports [--grpc]` | Displays listening ports, Frontend Planner (`7888+`), gRPC Port Blocks (`50051-50150`), and Docker ports, cross-referenced against registered apps. |
-| **`info`** | `info list-apps [acronym] [--grpc]` | Calls `ListRegisteredApps` via gRPC and displays grouped dependencies (`infra`, `connector`, `internal`, `external`), services, and LLM engines. |
+| **`info`** | `info list-apps [acronym] [-s/--search Q] [--category C] [--grpc]` | Calls `ListRegisteredApps` via gRPC, filters by acronym, category, or cross-entity search (including connector target resolution), and displays grouped dependencies (`infra`, `connector`, `internal`, `external`), services, and LLM engines. |
 | **`info`** | `info get-changelog <acronym> [--limit N] [--grpc]` | Fetches and formats the parsed `CHANGELOG.yaml` for a specific application. |
 | **`info`** | `info get-docs <acronym> [--grpc]` | Fetches the design documentation markdown for an app (truncates console preview to 500 chars unless `--grpc` is passed). |
-| **`info`** | `info deployments [--acronym X] [--grpc]` | Displays deployment table showing `MANAGED`, `EXT`, `sera_standard` version, `physical_path`, and `services`. |
+| **`info`** | `info deployments [--acronym X] [--category C] [-s/--search Q] [--grpc]` | Displays deployment table showing `MANAGED`, `EXT`, `sera_standard` version, `physical_path`, and `services`, with support for acronym, category, and deep search filtering. |
 | **`info`** | `info export-settings` | Reads `config/settings.yaml` from every registered app's `physical_path` and dumps a consolidated `output/debug_settings.yaml` file. |
 | **`info`** | `info codebase` | Walks all registered `physical_path` directories (excluding `.venv`, `node_modules`, `.git`, etc.) and calculates Lines, Characters, and estimated Tokens (`chars // 4`) split by Code vs. Docs. |
 | **`health`** | `health get-all [--grpc]` | Calls `GetAggregatedHealth` for all active applications. |
@@ -404,6 +407,7 @@ AMU provides a rich administrative CLI via `python3 application_management_utili
 | **`releases`** | `releases summary [--grpc]` | Iterates across all active apps, fetches changelogs, and prints a summary table of total versions, total updates, and category breakdowns. |
 | **`audit`** | `audit llms` | Audits registered cognitive engines, flagging non-`aif.gt-t.net` URLs and legacy `gemma-3` models. |
 | **`audit`** | `audit infra` | Audits `infra` dependencies, separating production-ready apps from apps using `dev` infrastructure (grouped by dev database name). |
+| **`audit`** | `audit docs [--acronym X] [--outdated-only] [--out-of-std-only] [--grpc]` | Audits design documentation across registered apps via `GetAppDocs`, verifying version match against the registered DB version and 14-header structural compliance against `docs_concept.md`. |
 | **`deploy`** | `deploy push-std [acronym]` | Copies AMU's `grpc_api/sera_standard_service.py` to target STD-enabled apps, restarts their systemd gRPC service, waits up to 30s for readiness, re-registers the app, and prints a colorized `difflib` unified diff of pre/post `GetAppInfo` and `GetDeepHealth` payloads. |
 | **`git`** | `git status <acronym> [--grpc]` | Checks uncommitted changes and latest commit message for a managed app. |
 | **`git`** | `git commit <acronym> -m "..." [--author-name] [--author-email]` | Syncs `settings.yaml` version, commits all changes, and pushes to GitLab. |
@@ -427,15 +431,17 @@ python3 application_management_utility.py module check-health [--grpc]
 python3 application_management_utility.py registry list
 python3 application_management_utility.py registry deps [--grpc]
 python3 application_management_utility.py registry register --auto
-python3 application_management_utility.py info list-apps [--grpc]
+python3 application_management_utility.py info list-apps [--search <query>] [--category <cat>] [--grpc]
+python3 application_management_utility.py info deployments [--search <query>] [--category <cat>] [--grpc]
 python3 application_management_utility.py info ports [--grpc]
 
-# Health & Release Auditing
+# Health, Documentation & Release Auditing
 python3 application_management_utility.py health get-all [--grpc]
 python3 application_management_utility.py health get <acronym> [--grpc]
 python3 application_management_utility.py releases summary [--grpc]
 python3 application_management_utility.py audit llms
 python3 application_management_utility.py audit infra
+python3 application_management_utility.py audit docs [--acronym <acronym>] [--outdated-only] [--out-of-std-only] [--grpc]
 
 # GitOps & Ecosystem Synchronization
 python3 application_management_utility.py git status <acronym> [--grpc]
@@ -452,40 +458,20 @@ python3 application_management_utility.py deploy push-std <acronym>
 
 ### 12.1. Configuration Schema (`config/settings.yaml`)
 
+*(Note: Universal SERA boilerplate blocks—`module_info.*`, standard `logging.*`, and standard protobuf `paths.*`—are omitted below; see `conf_concept.md`.)*
+
 | YAML Key Path | Purpose & Operational Impact | Configured / Default Value |
 | :--- | :--- | :--- |
-| `module_info.name` | Human-readable application name. | `"Application Management Utility"` |
-| `module_info.version` | Current semantic version (auto-synced with `CHANGELOG.yaml`). | `"0.3.9"` |
-| `module_info.acronym` | Unique ecosystem identifier. | `"AMU"` |
-| `module_info.category` | Architectural classification. | `"Utility"` |
-| `system_services.grpc.service_name` | Systemd unit name for health & restart orchestration. | `"amu-grpc.service"` |
-| `system_services.grpc.host` | gRPC bind address. | `"0.0.0.0"` |
-| `system_services.grpc.port` | gRPC listening port. | `50102` |
-| `system_services.grpc.max_workers` | ThreadPoolExecutor worker count for concurrent RPC handling. | `50` |
+| `system_services.grpc` | Systemd unit, bind address/port, and `ThreadPoolExecutor` worker count. | `"amu-grpc.service"` (`0.0.0.0:50102`, `50` workers) |
 | `database.write_dsn` | Primary PostgreSQL read/write connection string. | `postgresql://...@slo-aif-hadb.slo.gt-t.net:5432/sam_admin_prod_db` |
 | `database.read_dsn` | Read-replica PostgreSQL connection string. | `postgresql://...@slo-aif-ha.slo.gt-t.net:5433/sam_admin_prod_db` |
-| `external_services.vault.url` | HashiCorp Vault cluster URL for secret and API key retrieval. | `"https://vault-aif.gt-t.net:8200"` |
-| `external_services.vault.role_id` | AppRole Role ID for Vault authentication. | *(Configured in `settings.yaml`)* |
-| `external_services.vault.secret_id` | AppRole Secret ID for Vault authentication. | *(Configured in `settings.yaml`)* |
+| `external_services.vault` | HashiCorp Vault cluster URL and AppRole credentials (`role_id`, `secret_id`). | `"https://vault-aif.gt-t.net:8200"` |
 | `vault_paths.llm_api_key` | Vault KV v2 secret path storing the LLM proxy API key. | `"haproxy/global/apps/amu-prod"` |
-| `logging.level` | Console log level when running in server mode. | `"INFO"` |
-| `logging.directory` | Shared volume path for daily rotated log files. | `"/ai/assets/logs/amu_utility"` |
-| `logging.enable_file_logging` | Enables `MultiProcessSafeDailyLogger` file handlers. | `true` |
-| `paths.proto_source_dir` | Local relative directory containing `amu.proto`. | `"grpc_api/protos"` |
-| `paths.sera_proto_source_dir` | Global shared directory for `sera_standard.proto`. | `"/ai/assets/protos/sera_standard"` |
-| `paths.generated_stubs_path` | Output directory for compiled `*_pb2.py` stubs. | `"/ai/assets/protos/application_management_utility/generated"` |
-| `external_services.gitlab.url` | GitLab base URL for GitOps push operations. | `"https://gitlab.gt-t.net"` |
-| `external_services.gitlab.bot_username` | URL-encoded GitLab bot username. | `"martin.kecka%40gtt.net"` |
-| `external_services.gitlab.bot_token` | GitLab Personal Access Token (`glpat-...`). | *(Configured in `settings.yaml`)* |
+| `external_services.gitlab` | GitLab base URL, service account (`gia-ai`), and Personal Access Token (`bot_token`). | `"https://gitlab.gt-t.net"` |
 | `discovery.auto_rediscover_enabled` | Enables the background rediscovery thread in `services.py`. | `true` |
 | `discovery.interval_seconds` | Time between background rediscovery sweeps. | `86400` (24 hours) |
 | `discovery.initial_delay_seconds` | Startup delay before first background sweep. | `300` (5 minutes) |
-| `llm_engines.primary.provider` | Inference server type. | `"vllm"` |
-| `llm_engines.primary.base_url` | AI Factory vLLM load balancer endpoint. | `"https://aif-llm-gemma4-31b.aif.gt-t.net"` |
-| `llm_engines.primary.model` | Exact model identifier for `SmartSyncOrchestrator`. | `"google/gemma-4-31B-it"` |
-| `llm_engines.primary.timeout_seconds` | HTTP request timeout for LLM calls. | `300` |
-| `llm_engines.primary.max_tokens` | Max completion tokens. | `32768` |
-| `llm_engines.primary.enable_thinking` | Enables reasoning mode in `chat_template_kwargs`. | `"enable"` |
+| `llm_engines.primary` | AI Factory vLLM endpoint, model (`google/gemma-4-31B-it`), timeout, max tokens, and thinking mode for `SmartSyncOrchestrator`. | `"https://aif-llm-gemma4-31b.aif.gt-t.net"` (`timeout: 300s`, `max_tokens: 32768`, `enable_thinking: "enable"`) |
 
 ### 12.2. Security, Credential Sanitization & Permissions
 * **DSN Credential Stripping:** `SeraStandardServiceImpl.GetDeepHealth` sanitizes all database and Redis/Valkey URLs via `sanitize_dsn()` before transmitting them over gRPC or persisting them in `app_dependencies.connection_data`, ensuring plaintext passwords never leak into the registry database or SAM UI.

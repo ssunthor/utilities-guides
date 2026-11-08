@@ -509,17 +509,11 @@ python3 configuration_management_utility.py rancher rotate-tokens
 
 ### 12.1. Configuration Parameters (`config/settings.yaml`)
 
+*(Note: Universal SERA boilerplate blocks—`module_info.*`, standard `logging.*`, and standard protobuf `paths.*`—are omitted below; see `conf_concept.md`.)*
+
 | Configuration Key | Default / Configured Value | Purpose |
 | :--- | :--- | :--- |
-| `module_info.acronym` | `"CMU"` | Module identifier injected into `x-client-id` gRPC metadata. |
-| `module_info.version` | `"0.3.6"` | Static config version (runtime `GetAppInfo` reads `docs/CHANGELOG.yaml`). |
-| `system_services.grpc.service_name` | `"cmu-grpc.service"` | Systemd unit name checked during health probes. |
-| `system_services.grpc.host` / `port` | `"0.0.0.0"` / `50105` | Bind address and port for the CMU gRPC server. |
-| `system_services.grpc.max_workers` | `10` | ThreadPoolExecutor worker count for gRPC requests. |
-| `logging.level` / `directory` | `"INFO"` / `"/ai/assets/logs/cmu_utility"` | Log verbosity and target directory for daily rotating log files. |
-| `paths.proto_source_dir` | `"grpc_api/protos"` | Relative directory containing `cmu.proto`. |
-| `paths.sera_proto_source_dir` | `"/ai/assets/protos/sera_standard"` | Shared directory containing `sera_standard.proto`. |
-| `paths.generated_stubs_path` | `"/ai/assets/protos/configuration_management_utility/generated"` | Output path for compiled `*_pb2.py` and `*_pb2_grpc.py` stubs. |
+| `system_services.grpc` | `"cmu-grpc.service"` (`0.0.0.0:50105`, `10` workers) | Systemd unit, bind address/port, and `ThreadPoolExecutor` worker count. |
 | `paths.lora_models_dir` | `"/ai/assets/lora_models"` | Canonical local filesystem repository for LoRA adapter weights (`<model>/<lora_name>`). |
 | `database.write_dsn` | `postgresql://sam_admin_prod_user:***@slo-aif-hadb.slo.gt-t.net:5432/sam_admin_prod_db` | Primary read/write Patroni PostgreSQL connection string. |
 | `database.read_dsn` | `postgresql://sam_admin_prod_user:***@slo-aif-ha.slo.gt-t.net:5433/sam_admin_prod_db` | Read-replica Patroni PostgreSQL connection string. |

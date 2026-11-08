@@ -4,8 +4,8 @@
 **Category:** (AM) Admin Module  
 **Name:** Sera Admin Module  
 **Acronym:** SAM  
-**Version:** 0.7.4  
-**Date:** 2026-10-27  
+**Version:** 0.7.5  
+**Date:** 2026-10-31  
 **Author:** Martin Kecka & Gemini AI  
 **Status:** Active  
 
@@ -215,13 +215,14 @@ graph TD
 │       ├── ThemeContext.jsx                                 # React Context for theme state
 │       ├── components/common/
 │       │   ├── GlossaryLabel.jsx                            # Interactive tooltip wrapper for SRE terminology
-│       │   └── MarkdownRenderer.jsx                         # GFM and raw HTML Markdown renderer with internal page navigation
+│       │   ├── MarkdownRenderer.jsx                         # GFM and raw HTML Markdown renderer with internal page navigation
+│       │   └── SeasonalOverlay.jsx                          # Visual canvas overlay for active GIA Gateway seasonal themes
 │       ├── constants/
 │       │   ├── glossary.js                                  # Definitions for SRE metrics (KV cache, Tensor core, XID, etc.)
 │       │   └── hmuConstants.js                              # Ephemeral pod keys excluded from config drift detection
 │       ├── features/
 │       │   ├── amu/                                         # AMU UI components (Topology, Releases, Agent Inventory) and dialogs
-│       │   ├── cmu/                                         # CMU UI components (IdentityManagerWidget, LoraManagerWidget) and Identity/Model/LoRA dialogs
+│       │   ├── cmu/                                         # CMU UI components (IdentityManagerWidget, ModelsAndLoraWidget) and Identity/Model/LoRA dialogs
 │       │   ├── diu/                                         # DIU UI components (Knowledge Tree, Reading/Investigation views, Stats)
 │       │   ├── documentation/                               # Documentation accordion and unified ChangelogViewer
 │       │   ├── hmu/                                         # HMU UI components (Engines, Topology, Traffic, Events, Benchmarks, Cost, Prompts) and dialogs
@@ -452,7 +453,7 @@ Implements the universal SERA ecosystem standard contract (`sera.standard.v1.Ser
 The `SAM-WebUI` is a React 18 SPA built with Vite, Material-UI (MUI v5), TanStack React Query v5, and Recharts, served under the base path `/app/sera_admin_module/`.
 
 ### 9.1. Global Features & Theme Engine
-- **Multi-Theme Engine (`CustomThemeProvider.jsx`, `theme.js`):** Supports 6 themes (`dark`, `light`, `pink`, `purple`, `red`, `blue`) with glassmorphism (`backdropFilter: blur(12px)`). Syncs user theme preferences with the GIA Gateway via `GET /api/auth/me` and `PUT /api/auth/me/theme`.
+- **Multi-Theme & Seasonal Event Engine (`CustomThemeProvider.jsx`, `SeasonalOverlay.jsx`, `theme.js`):** Supports 6 standard themes (`dark`, `light`, `pink`, `purple`, `red`, `blue`) with glassmorphism (`backdropFilter: blur(12px)`), plus dynamic calendar-driven seasonal themes (`seasonal_event` / `seasonal_themes`, e.g., `halloween` with `SeasonalOverlay.jsx`) and resilient dark-mode fallback on unrecognized theme IDs. Syncs user theme preferences and seasonal opt-outs with the GIA Gateway via `GET /api/auth/me?app=sera_admin_module` and `PUT /api/auth/me/theme?app=sera_admin_module`.
 - **"What's New" Ecosystem Popup (`App.jsx`):** Compares `localStorage.getItem('lastSeenChangelogs')` against live module versions on load, automatically popping up a unified timeline dialog of unseen ecosystem releases.
 - **SRE Glossary (`GlossaryLabel.jsx`):** Interactive tooltips explaining complex hardware/inference metrics (e.g., Compute Batch Size vs. Prefix Caching, KV Cache pre-allocation, Tensor Core activity, B-OK/s).
 
@@ -470,16 +471,19 @@ The `SAM-WebUI` is a React 18 SPA built with Vite, Material-UI (MUI v5), TanStac
    - **Ecosystem Releases (`AmuReleasesWidget.jsx`):** Weekly paginated velocity tracker with category counters, application/author filters, and `[NEEDS_DOCS]` badge indicators.
    - **AI Agent Inventory (`AmuAgentInventoryWidget.jsx`):** Inline-editable compliance matrix for internal agents, support agents, and external/unmanaged agents (tracking Autonomy Level, Ecosystem, Business Unit, Lifecycle Stage, Oversight Model, AI Risk Classification, Business Impact, Data Sensitivity, Decision Influence, and Control Status) with CSV export.
 3. **OMU (`OperationsDashboard.jsx` - 2 Tabs):**
-   - **Cluster Overview:** Categorized accordions (*Databases*, *Brokers & Cache*, *Core Infrastructure*, *Kubernetes Clusters*, *Miscellaneous Workloads*) rendering specialized status cards (`PatroniCard`, `QdrantCard`, `KafkaCard`, `ValkeyCard`, `HaCard`, `DcsCard`, `VaultCard`, `KeycloakCard`, `K8sCard`, `GenericCard`). Displays cluster health, kernel versions, pending kernel update warnings (`linux-image` / `linux-generic`), and stale inspection alerts (`> 48 hours`). Clicking any card opens `PatchingDetailsDialog.jsx` to inspect historical patching audit runs, raw terminal execution logs, pending APT packages, and Kubernetes pod phase breakdowns (`K8sPodsTab.jsx`).
-   - **Patching & Schedule (`PatchingScheduleWidget.jsx`):** Unified dashboard for OMU's Autonomous Weekend Patching Scheduler and Audit Execution History. Displays queued groups, active auto-patch vs. visibility-only counts, scheduled Saturday UTC windows, inline `auto_patch` toggles, drift reasons, and affected VM count badges with hostname hover tooltips. Includes controls to evaluate fleet drift, override/add schedule slots, delete schedule entries, send Friday Pre-Flight Digest or Sunday Summary emails, and inspect historical patching runs and per-node raw console logs via `RunDetailsDialog`.
+   - **Cluster Overview:** Categorized accordions (*Databases*, *Brokers & Cache*, *Core Infrastructure*, *Kubernetes Clusters*, *Miscellaneous Workloads*) rendering specialized status cards (`PatroniCard`, `QdrantCard`, `KafkaCard`, `ValkeyCard`, `HaCard`, `DcsCard`, `VaultCard`, `KeycloakCard`, `K8sCard`, `GenericCard`). Displays cluster health, kernel versions, pending kernel update warnings (`linux-image` / `linux-generic`), and stale inspection alerts (`> 48 hours`). Clicking any card opens `PatchingDetailsDialog.jsx` to inspect historical patching audit runs (including amber `WARNING` run status badges), raw terminal execution logs, pending APT packages, and Kubernetes pod phase breakdowns (`K8sPodsTab.jsx`).
+   - **Patching & Schedule (`PatchingScheduleWidget.jsx` & `RunDetailsDialog`):** Unified dashboard for OMU's Autonomous Weekend Patching Scheduler and Audit Execution History. Displays queued groups, active auto-patch vs. visibility-only counts, scheduled Saturday UTC windows, inline `auto_patch` toggles, drift reasons, and affected VM count badges with hostname hover tooltips. Includes controls to evaluate fleet drift, override/add schedule slots, delete schedule entries, send Friday Pre-Flight Digest or Sunday Summary emails, and filter audit history by status (`ALL`, `COMPLETED`, `WARNING`, `FAILED`, `RUNNING`). Clicking any run opens `RunDetailsDialog`, featuring:
+     - **Interactive Node Summary Table:** Displays pre/post kernel versions, upgraded package counts, reboot flags, and dynamic `Log Status` (`Expanded` / `View Log`) chips; clicking any node row automatically expands that node's accordion and smoothly scrolls it into view.
+     - **Cluster Post-Flight Health Verification Card:** Dedicated collapsible accordion rendering `verification_log`, automatically highlighting degraded workloads/nodes (`❌`, `🛑`, `degraded`) in error red (`Degraded Workloads` vs. `All Workloads Healthy`) with one-click clipboard export.
+     - **Collapsible Per-Node Raw Logs:** Defaults to collapsed on multi-node runs to prevent doomscrolling, paired with global `Expand All` / `Collapse All` toolbar controls and per-node one-click clipboard copy buttons.
 4. **CMU (`ConfigurationDashboard.jsx` - 2 Tabs):**
    - **Identity Management (`IdentityManagerWidget.jsx`):** Dual sortable tables for HAProxy Native Keys and Keycloak Clients (`aif-llm` Realm) (filtering out non-service-account internal clients). Displays live status, Vault metadata (Env, Requestor, Description), Last Usage, and Total Usage.
      - Includes `CreateIdentityDialog.jsx` (streaming NDJSON creation for `dev`, `test`, `stag`, `prod`), `HaproxyIdentityDetailsDialog.jsx`, and `KeycloakIdentityDetailsDialog.jsx`.
      - Both identity details dialogs feature secret reveal/copy, live Auth Retest, a **Recent Prompts (24h)** section (displaying the latest 5 prompts for the client with click-to-inspect `PromptPayloadDialog.jsx` and header click navigation to `/hmu?tab=prompts&client=<clientId>`), and a **Daily Audits** table that displays the latest 7 active days directly while grouping older historical records into collapsible monthly summary rows inside a bounded scrollable container.
-   - **Models & LoRA (`LoraManagerWidget.jsx`, `ModelManifestsDialog.jsx`, `LoraUploadDialog.jsx`):**
-     - **Global Active & Recent Operations Banner:** Displays any running or recently finished Model/LoRA background operation across all connected SAM users, with per-model `Busy` badges, action lockouts, and a non-blocking wide (`lg`) live terminal console dialog that can be closed and reopened at any time.
-     - **Deployed AI Models & Cluster Topology:** Unified matrix across `PRG`, `SLO`, and `NYC` displaying `VLLM`/`NIM` engine badges, `Kustomize Overlays` vs. `Flat Manifests` layout indicators, per-tier deployment readiness chips (`gpu0: 2/2 Ready`), resource counts (`deploy • pods • svc • pvc`), live GitLab vs. Kubernetes drift verification (`Verify All Drift` and per-cluster Topology & Drift inspection modal), `ModelManifestsDialog.jsx` (allowing admins to edit YAML manifests, create/delete `overlays/deployment-<tier>` GPU overlays, toggle active tiers per cluster in `clusters/<loc>/kustomization.yaml`, and commit/push to GitLab), and rolling model deployment (`Deploy & Rollout`).
-     - **LoRA Adapter Repository & Cluster Topology:** Unified matrix across `LOCAL REPO` (`/ai/assets/lora_models`) and `PRG`/`SLO`/`NYC` clusters displaying `Stored`, `Applied`, `PVC Only`, or `Not Present` status alongside size and timestamps, supporting multipart `.zip`/`.tar.gz` archive upload, PVC synchronization without restart, full deployment with rollout, and per-cluster or global LoRA removal.
+   - **Models & LoRA (`ModelsAndLoraWidget.jsx`, `ModelManifestsDialog.jsx`, `DeployModelDialog.jsx`, `InspectModelDialog.jsx`, `LoraUploadDialog.jsx`, `DisableLoraDialog.jsx`, `CmuTaskConsoleDialog.jsx`):**
+     - **Global Active & Recent Operations Banner:** Displays any running or recently finished Model/LoRA background operation across all connected SAM users, with per-model `Busy` badges, action lockouts, and a non-blocking wide (`lg`) live terminal console dialog (`CmuTaskConsoleDialog.jsx`) that can be closed and reopened at any time.
+     - **Deployed AI Models & Cluster Topology:** Unified matrix across `PRG`, `SLO`, and `NYC` displaying `VLLM`/`NIM` engine badges, `Kustomize Overlays` vs. `Flat Manifests` layout indicators, per-tier deployment readiness chips (`gpu0: 2/2 Ready`), resource counts (`deploy • pods • svc • pvc`), live GitLab vs. Kubernetes drift verification (`Verify All Drift` and per-cluster `InspectModelDialog.jsx`), `ModelManifestsDialog.jsx` (allowing admins to edit YAML manifests, create/delete `overlays/deployment-<tier>` GPU overlays, toggle active tiers per cluster in `clusters/<loc>/kustomization.yaml`, and commit/push to GitLab), and rolling model deployment (`DeployModelDialog.jsx`).
+     - **LoRA Adapter Repository & Cluster Topology:** Unified matrix across `LOCAL REPO` (`/ai/assets/lora_models`) and `PRG`/`SLO`/`NYC` clusters displaying `Stored`, `Applied`, `PVC Only`, or `Not Present` status alongside size and timestamps, supporting multipart `.zip`/`.tar.gz` archive upload (`LoraUploadDialog.jsx`), PVC synchronization without restart, full deployment with rollout, and per-cluster or global LoRA removal (`DisableLoraDialog.jsx`).
 5. **DIU (`DiuDashboard.jsx`):**
    - **Knowledge Tree Browser (`KnowledgeTreeBrowser.jsx`):** Collapsible left drawer navigating Confluence spaces or title search results, paired with `DIUStats.jsx` (landing page table of database content statistics across spaces).
    - **Dual inspection modes:** *Reading View* (`ReadingViewPanel.jsx` reconstructing full articles with auto-generated TOC, Markdown tables from `structured_tables_json`, and inline images/AI captions from `/api/diu/assets/`) and *Investigation View* (`InvestigationViewPanel.jsx` exposing document telemetry, multi-pass summaries, HyDE questions, synthesized multi-page Q&As, and per-chunk LLM analysis/VDB metadata).
@@ -551,11 +555,12 @@ python3 sera_admin_module.py benchmarks run-automated --host http://localhost:78
 
 ### 12.1. Configuration Parameters (`config/settings.yaml`)
 
+*(Note: Universal SERA boilerplate blocks—`module_info.*`, standard `logging.*`, and standard protobuf `paths.*`—are omitted below; see `conf_concept.md`.)*
+
 | Section / Key | Purpose | Default / Production Value |
 | :--- | :--- | :--- |
-| `module_info.acronym` / `version` | Module identifier and semantic version | `"SAM"` / `"0.7.4"` |
-| `system_services.api.host` / `port` | FastAPI REST server bind address and port | `"0.0.0.0"` / `7890` (`sam-api.service`) |
-| `system_services.grpc.host` / `port` | SERA Standard gRPC bind address, port, and workers | `"0.0.0.0"` / `50103` / `10` (`sam-grpc.service`) |
+| `system_services.api` | FastAPI REST server systemd unit and bind address/port | `"sam-api.service"` (`0.0.0.0:7890`) |
+| `system_services.grpc` | SERA Standard gRPC systemd unit, bind address/port, and worker count | `"sam-grpc.service"` (`0.0.0.0:50103`, `10` workers) |
 | `database.write_dsn` | PostgreSQL Primary HA write connection string | `postgresql://...@slo-aif-hadb.slo.gt-t.net:5432/sam_admin_prod_db` |
 | `database.read_dsn` | PostgreSQL Replica HA read connection string | `postgresql://...@slo-aif-ha.slo.gt-t.net:5433/sam_admin_prod_db` |
 | `valkey.ui_cache_url` | Primary Valkey cache and distributed lock DB | `valkey://...@slo-aif-ha.slo.gt-t.net:6379/16` |
@@ -567,10 +572,8 @@ python3 sera_admin_module.py benchmarks run-automated --host http://localhost:78
 | `connectors.omu` | OMU gRPC target and timeout | `localhost:50104` (`30s`) |
 | `connectors.cmu` | CMU gRPC target and timeout | `localhost:50105` (`30s`) |
 | `connectors.diu` | DIU gRPC target and timeout | `localhost:50109` (`30s`) |
-| `paths.*_stubs_path` | Shared filesystem paths for generated gRPC stubs | `/ai/assets/protos/.../generated` |
 | `registered_modules` | List of ecosystem modules (`SAM`, `HMU`, `AMU`, `OMU`, `DIU`, `CMU`) with `docs_file` and `changelog_file` paths | 6 registered modules |
 | `llm_engines.primary` | Reasoning LLM configuration for SRE diagnostics and GitOps | `google/gemma-4-31B-it` (`max_tokens: 32768`, `timeout: 180s`, `enable_thinking: "enable"`) |
-| `logging.*` | Log level and rotating file handler paths | `INFO`, `/ai/assets/logs/sam_admin/sam_app.log` & `sam_err.log` (14-day retention) |
 
 ### 12.2. Authentication, RBAC & Secret Sanitization
 - **Gateway Identity Injection (`rest_api/dependencies.py`):** SAM trusts upstream authentication performed by the GIA Gateway, extracting `x-forwarded-user`, `x-forwarded-display-name`, and comma-separated `x-forwarded-groups`.
